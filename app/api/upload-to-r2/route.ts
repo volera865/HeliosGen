@@ -69,8 +69,9 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "Data URL exceeds 3 MB decoded limit" }, { status: 413 });
       }
     } else if (dataUrl.startsWith("http")) {
-      if (resolvedMime && !ALLOWED_MIMES.has(resolvedMime)) {
-        return NextResponse.json({ error: `Unsupported media type: ${resolvedMime}` }, { status: 415 });
+      // Remote mirrors must declare an allowlisted MIME (clients always pass one).
+      if (!resolvedMime || !ALLOWED_MIMES.has(resolvedMime)) {
+        return NextResponse.json({ error: `Unsupported media type: ${resolvedMime || "unknown"}` }, { status: 415 });
       }
     } else {
       return NextResponse.json({ error: "dataUrl must be a data: or http: URL" }, { status: 400 });
