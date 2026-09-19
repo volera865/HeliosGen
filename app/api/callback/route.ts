@@ -6,6 +6,25 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import { GUEST_MODE } from "@/lib/guestMode";
 import * as guestDb from "@/lib/guest/db";
 
+// Same host allowlist used by app/api/download/route.ts for kie.ai / R2 assets.
+const ALLOWED_ORIGINS = [
+  process.env.R2_PUBLIC_URL ?? "",
+  "https://cdn.kie.ai",
+  "https://api.kie.ai",
+  "https://replicate.delivery",
+  "https://pbxt.replicate.delivery",
+].filter(Boolean).map((o) => o.replace(/\/$/, ""));
+
+function isAllowedResultUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "https:") return false;
+    return ALLOWED_ORIGINS.some((origin) => url.startsWith(origin));
+  } catch {
+    return false;
+  }
+}
+
 function extractUrls(resultJson?: string): string[] {
   if (!resultJson) return [];
   try {
@@ -24,22 +43,44 @@ function settle(taskId: string, result: Parameters<typeof jobStore.set>[1]) {
   jobEvents.emit(`job:${taskId}`, result);
 }
 
+async function loadGeneration(taskId: string): Promise<{ status: string } | null> {
+  if (GUEST_MODE) {
+    const gen = guestDb.recoverJob(taskId);
+    return gen ? { status: gen.status } : null;
+  }
+  const { data: gen } = await supabaseAdmin
+    .from("generations")
+    .select("status")
+    .eq("task_id", taskId)
+    .single();
+  return gen ? { status: gen.status } : null;
+}
+
+function isTerminal(status: string): boolean {
+  return status === "done" || status === "error";
+}
+
 // The R2 mirror runs in `after()` and needs the full window to copy large
 // videos before the platform kills the invocation.
 export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  console.log("[callback] received:", JSON.stringify(body, null, 2));
 
   const data   = body.data ?? body;
   const taskId = data.taskId ?? data.id ?? body.taskId ?? body.id;
   const state  = String(data.state ?? data.status ?? "").toLowerCase();
 
+  // Log only identifiers — never the full callback body (may contain URLs/keys).
   console.log("[callback] taskId:", taskId, "state:", state);
 
   if (!taskId) {
-    console.log("[callback] could not extract taskId");
+    return NextResponse.json({ received: true });
+  }
+
+  const gen = await loadGeneration(taskId);
+  if (!gen || isTerminal(gen.status)) {
+    // Unknown or already settled — ack without mutating anything.
     return NextResponse.json({ received: true });
   }
 
@@ -47,7 +88,6 @@ export async function POST(req: NextRequest) {
   // carry no state/status field but do carry body.code and body.msg).
   if (body.code !== undefined && body.code !== 200) {
     const error = data.failMsg ?? body.msg ?? "Generation failed";
-    console.log("[callback] top-level error code:", body.code, error);
     settle(taskId, { status: "error", error });
     if (GUEST_MODE) {
       guestDb.updateGeneration(taskId, { status: "error", error_msg: error });
@@ -71,6 +111,8 @@ export async function POST(req: NextRequest) {
     if (kieUrls.length === 0 && (data.output?.[0] ?? data.output)) {
       kieUrls.push(data.output?.[0] ?? data.output);
     }
+    // Accept only https URLs on the download allowlist; ignore others.
+    kieUrls = kieUrls.filter((u) => typeof u === "string" && isAllowedResultUrl(u));
     if (kieUrls.length > 0) {
       const existing = jobStore.get(taskId);
       const isVideo  = existing?.status === "pending" && (existing as { type?: string }).type === "video";
@@ -78,8 +120,6 @@ export async function POST(req: NextRequest) {
 
       const mirrorAll = () => Promise.all(kieUrls.map((u) => mirrorToR2(u, folder)));
 
-      // Keep the mirror alive past the response instead of detaching it — a
-      // detached promise is frozen as soon as the invocation returns.
       after(async () => {
         let storedUrls: string[];
         try {
@@ -119,7 +159,7 @@ export async function POST(req: NextRequest) {
         }
       });
     } else {
-      console.log("[callback] success but no URL found in resultJson");
+      console.log("[callback] success but no allowed URL found");
     }
   } else if (state === "fail" || state === "failed" || state === "error") {
     const error = data.failMsg ?? data.error ?? body.msg ?? "Generation failed";
