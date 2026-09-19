@@ -91,6 +91,30 @@ export async function POST(req: NextRequest) {
     };
     if (apiInput.extra) Object.assign(input, apiInput.extra);
 
+  } else if (apiInput.useKlingAiAvatar) {
+    // ── Kling AI Avatar (face image + audio → talking video) ─────────────────
+    // { image_url, audio_url, prompt } only — no duration / aspect / resolution
+    const avatarErr = "Kling AI Avatar needs one face image and one audio file.";
+    const rawAudio = (rawRefAudioUrls as string[])[0];
+    if (!rawStartFrame || !rawAudio) {
+      return NextResponse.json({ error: avatarErr }, { status: 400 });
+    }
+    const [imageUrl, audioUrl] = await Promise.all([
+      ensureR2(rawStartFrame, "references").catch(() => rawStartFrame),
+      ensureR2(rawAudio, "references").catch(() => rawAudio),
+    ]);
+    if (
+      typeof imageUrl !== "string" || !imageUrl.startsWith("https:") ||
+      typeof audioUrl !== "string" || !audioUrl.startsWith("https:")
+    ) {
+      return NextResponse.json({ error: avatarErr }, { status: 400 });
+    }
+    input = {
+      image_url: imageUrl,
+      audio_url: audioUrl,
+      prompt:    prompt ?? "",
+    };
+
   } else if (apiInput.firstFrameKey) {
     // ── Seedance-style models (separate frame keys + multi-ref arrays) ─────────
     const [startFrameUrl, endFrameUrl, r2RefImages, r2RefVideos, r2RefAudios] = await Promise.all([
@@ -398,6 +422,11 @@ export async function POST(req: NextRequest) {
     ? [
         ...((input.input_urls as string[] | undefined) ?? []),
         ...((input.video_urls as string[] | undefined) ?? []),
+      ]
+    : apiInput.useKlingAiAvatar
+    ? [
+        ...((typeof input.image_url === "string" ? [input.image_url] : [])),
+        ...((typeof input.audio_url === "string" ? [input.audio_url] : [])),
       ]
     : apiInput.useGeminiOmniVideo
     ? [
