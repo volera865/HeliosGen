@@ -1794,6 +1794,7 @@ function GalleryInner() {
     setRefImages(prev => [...prev, ...newEntries]);
 
     const token = await getToken();
+    if (!token) return;
     await Promise.all(toAdd.map(async (file, i) => {
       const entry = newEntries[i];
       try {
@@ -1801,7 +1802,7 @@ function GalleryInner() {
           method: "POST",
           headers: {
             "Content-Type": file.type,
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            Authorization: `Bearer ${token}`,
           },
           body: file,
         });
@@ -1895,12 +1896,13 @@ function GalleryInner() {
     }
 
     const token = await getToken();
+    if (!token) return;
     await Promise.all(toAdd.map(async (file, i) => {
       const entry = newEntries[i];
       try {
         const res = await fetch("/api/upload-asset", {
           method: "POST",
-          headers: { "Content-Type": file.type, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          headers: { "Content-Type": file.type, Authorization: `Bearer ${token}` },
           body: file,
         });
         const data = await res.json() as { cdnUrl?: string; error?: string };

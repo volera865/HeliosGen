@@ -163,11 +163,12 @@ export function MediaPickerModal({
     setUrlLoading(true);
     try {
       const token = await getToken();
+      if (!token) { setUrlError("Sign in required"); return; }
       const res = await fetch("/api/fetch-url", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ url: trimmed }),
       });

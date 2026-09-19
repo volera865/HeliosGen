@@ -262,8 +262,8 @@ export default function VideoInputNode({ id, data, selected }: NodeProps<VideoIn
       const bytes = await blob.arrayBuffer();
       const { data: authData } = await createClient().auth.getSession();
       const token = authData.session?.access_token;
-      const authHeaders: Record<string, string> = {};
-      if (token) authHeaders["Authorization"] = `Bearer ${token}`;
+      if (!token) { setCaptureErr("Sign in required"); return; }
+      const authHeaders: Record<string, string> = { Authorization: `Bearer ${token}` };
 
       const res  = await fetch("/api/upload-asset", {
         method: "POST",
@@ -406,8 +406,8 @@ export default function VideoInputNode({ id, data, selected }: NodeProps<VideoIn
     const hash  = await sha256Hex(bytes);
     const { data: authData } = await createClient().auth.getSession();
     const token = authData.session?.access_token;
-    const authHeaders: Record<string, string> = {};
-    if (token) authHeaders["Authorization"] = `Bearer ${token}`;
+    if (!token) { useWorkflowStore.getState().setAuthModalOpen(true); return; }
+    const authHeaders: Record<string, string> = { Authorization: `Bearer ${token}` };
 
     try {
       const lookupRes = await fetch(`/api/lookup-asset?hash=${hash}`, { headers: authHeaders });

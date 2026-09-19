@@ -186,8 +186,11 @@ export default function AddNodeMenu({ anchorRect, onClose }: AddNodeMenuProps) {
 
       const bytes = await file.arrayBuffer();
       const token = await getToken();
-      const headers: Record<string, string> = { "Content-Type": file.type || (isVideo ? "video/mp4" : "image/jpeg") };
-      if (token) headers["Authorization"] = `Bearer ${token}`;
+      if (!token) { useWorkflowStore.getState().setAuthModalOpen(true); return; }
+      const headers: Record<string, string> = {
+        "Content-Type": file.type || (isVideo ? "video/mp4" : "image/jpeg"),
+        Authorization: `Bearer ${token}`,
+      };
       try {
         const res = await fetch("/api/upload-asset", {
           method: "POST",

@@ -549,8 +549,8 @@ export default function WorkflowCanvas() {
               const hash = await sha256Hex(bytes);
               const { data: authData } = await (await import("@/lib/supabase/client")).createClient().auth.getSession();
               const token = authData.session?.access_token;
-              const authHdr: Record<string, string> = {};
-              if (token) authHdr["Authorization"] = `Bearer ${token}`;
+              if (!token) return;
+              const authHdr: Record<string, string> = { Authorization: `Bearer ${token}` };
 
               try {
                 const lk = await fetch(`/api/lookup-asset?hash=${hash}`, { headers: authHdr });
@@ -583,8 +583,8 @@ export default function WorkflowCanvas() {
               const hash = await sha256Hex(bytes);
               const { data: authData } = await (await import("@/lib/supabase/client")).createClient().auth.getSession();
               const token = authData.session?.access_token;
-              const authHdr: Record<string, string> = {};
-              if (token) authHdr["Authorization"] = `Bearer ${token}`;
+              if (!token) return;
+              const authHdr: Record<string, string> = { Authorization: `Bearer ${token}` };
 
               try {
                 const lk = await fetch(`/api/lookup-asset?hash=${hash}`, { headers: authHdr });

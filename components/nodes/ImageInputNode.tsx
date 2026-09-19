@@ -88,8 +88,11 @@ export default function ImageInputNode({ id, data, selected }: NodeProps<ImageIn
           (async () => {
             try {
               const { data: { session } } = await createClient().auth.getSession();
-              const headers: Record<string, string> = { "Content-Type": "application/json" };
-              if (session?.access_token) headers["Authorization"] = `Bearer ${session.access_token}`;
+              if (!session?.access_token) return;
+              const headers: Record<string, string> = {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${session.access_token}`,
+              };
 
               const r = await fetch("/api/upload-to-r2", {
                 method: "POST",
@@ -118,8 +121,8 @@ export default function ImageInputNode({ id, data, selected }: NodeProps<ImageIn
 
       const { data: { session } } = await createClient().auth.getSession();
       const authToken = session?.access_token;
-      const authHeaders: Record<string, string> = {};
-      if (authToken) authHeaders["Authorization"] = `Bearer ${authToken}`;
+      if (!authToken) { useWorkflowStore.getState().setAuthModalOpen(true); return; }
+      const authHeaders: Record<string, string> = { Authorization: `Bearer ${authToken}` };
 
       // ── Cache lookup: skip upload if already in R2 ───────────────────────
       try {
