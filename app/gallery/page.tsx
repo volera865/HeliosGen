@@ -2225,11 +2225,11 @@ function GalleryInner() {
         };
         const HANDLE_LABELS: Record<string, string> = {
           resource: "Reference image",
-          startFrame: "Start frame image",
+          startFrame: vm?.apiInput.useKlingAiAvatar ? "Face image" : "Start frame image",
           endFrame: "End frame image",
           videoRef: "Reference video",
           referenceVideo: "Reference video",
-          audioRef: "Reference audio",
+          audioRef: vm?.apiInput.useKlingAiAvatar ? "Audio file" : "Reference audio",
           prompt: "Text prompt",
         };
         const missing = vm.requiredHandles.filter(h => !handleHasContent(h));
@@ -2621,7 +2621,12 @@ function GalleryInner() {
   const displayVidRefAudios = getDisplayOrder(vidRefAudios, draggingId, reorderOverId);
 
   const vidRequiresPrompt = isVideo && !!(vidModel?.apiInput.promptMaxLength);
-  const canGenerate = kieKeySet === false ? false : submitting ? false : promptOverLimit ? false : (vidRequiresPrompt || !isVideo) ? prompt.trim().length > 0 : true;
+  const isAvatarModel = isVideo && !!vidModel?.apiInput.useKlingAiAvatar;
+  const avatarInputsReady = !isAvatarModel || (
+    !!(vidStartFrame?.cdnUrl && !vidStartFrame.error) &&
+    vidRefAudios.some((r) => r.cdnUrl && !r.error)
+  );
+  const canGenerate = kieKeySet === false ? false : submitting ? false : promptOverLimit ? false : !avatarInputsReady ? false : (vidRequiresPrompt || !isVideo) ? prompt.trim().length > 0 : true;
 
   const handleAddReference = useCallback((url: string) => {
     if (refImages.some(r => r.cdnUrl === url || r.objectUrl === url)) {
@@ -3875,6 +3880,7 @@ function GalleryInner() {
               const useElems = !!(vidModel?.apiInput.useKlingElements);
               const isHappyHorse = vidModel?.id === "happyhorse";
               const isVeo = modelId === "veo3" || modelId === "veo3_fast" || modelId === "veo3_lite";
+              const isAvatar = !!vidModel?.apiInput.useKlingAiAvatar;
               for (const h of vidRefHandles) {
                 if (isVeo) {
                   if (veoMode === "references" && (h === "startFrame" || h === "endFrame")) continue;
@@ -3889,8 +3895,9 @@ function GalleryInner() {
                 if (isSeedance && seedanceHasFrame && (h === "resource" || h === "referenceVideo" || h === "audioRef")) continue;
                 if (isSeedance && seedanceHasRef   && (h === "startFrame" || h === "endFrame")) continue;
                 if (h === "startFrame") {
-                  if (vidStartFrame) slots.push({ kind: "filled", target: h, mediaKind: "image", label: "Start Frame", ref: vidStartFrame });
-                  else               slots.push({ kind: "add",    target: h, mediaKind: "image", label: "Start Frame", countLeft: 1 });
+                  const faceLabel = isAvatar ? "Face" : "Start Frame";
+                  if (vidStartFrame) slots.push({ kind: "filled", target: h, mediaKind: "image", label: faceLabel, ref: vidStartFrame });
+                  else               slots.push({ kind: "add",    target: h, mediaKind: "image", label: faceLabel, countLeft: 1 });
                 } else if (h === "endFrame") {
                   if (vidEndFrame)   slots.push({ kind: "filled", target: h, mediaKind: "image", label: "End Frame", ref: vidEndFrame });
                   else               slots.push({ kind: "add",    target: h, mediaKind: "image", label: "End Frame", countLeft: 1 });
@@ -3921,7 +3928,13 @@ function GalleryInner() {
                 }
               }
               return (
-                <div style={{ padding: "14px 16px 14px", display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "flex-start" }} onPointerUp={() => { if (_reorderDragItem) { _reorderDragItem = null; _reorderOverId = null; setDraggingId(null); setReorderOverId(null); } }}>
+                <div style={{ padding: "14px 16px 14px", display: "flex", flexDirection: "column", gap: "10px" }} onPointerUp={() => { if (_reorderDragItem) { _reorderDragItem = null; _reorderOverId = null; setDraggingId(null); setReorderOverId(null); } }}>
+                  {isAvatar && (
+                    <p style={{ margin: 0, fontSize: "12px", color: "rgba(255,255,255,0.45)", lineHeight: 1.4 }}>
+                      Upload one face image and one audio file (MP3 recommended, under 4 MB).
+                    </p>
+                  )}
+                  <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "flex-start" }}>
                   {slots.map((slot, idx) => {
                     if (slot.kind === "element-filled") {
                       const el = slot.element; const thumb = el.imageUrls[0]; const hovId = `elem-${el.id}`;
@@ -3969,6 +3982,7 @@ function GalleryInner() {
                         </button>
                         );
                   })}
+                  </div>
                 </div>
               );
             })()}

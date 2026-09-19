@@ -575,6 +575,7 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
   );
 
   // Apply model-specific label/class overrides.
+  const isAvatarModel = !!cfg.apiInput.useKlingAiAvatar;
   const handles = BASE_HANDLES.map((h) => {
     let label = h.label;
     let className = h.className;
@@ -585,10 +586,15 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
     if (h.id === "referenceVideo" && cfg.maxReferenceVideos)
       label = `Reference videos (up to ${cfg.maxReferenceVideos})`;
     if (h.id === "audioRef" && cfg.maxReferenceAudios)
-      label = `Reference audios (up to ${cfg.maxReferenceAudios})`;
+      label = isAvatarModel
+        ? "Audio"
+        : `Reference audios (up to ${cfg.maxReferenceAudios})`;
     if (h.id === "startFrame" && cfg.apiInput.useMotionControl) {
       label = "Character";
       className = "node-handle-icon node-handle-icon-character";
+    }
+    if (h.id === "startFrame" && isAvatarModel) {
+      label = "Face";
     }
     return { ...h, label, className };
   });
@@ -1201,6 +1207,12 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
         <MissingInputWarning messages={[
           ...(!connectedHandles.has("prompt") && !cfg.promptOptional ? ["A text node is required"] : []),
           ...(hasFailedMediaInput ? ["A connected image/video input has no valid content"] : []),
+        ]} />
+      )}
+      {isAvatarModel && status !== "running" && !data.locked &&
+        (!connectedHandles.has("startFrame") || !connectedHandles.has("audioRef")) && (
+        <MissingInputWarning messages={[
+          "Upload one face image and one audio file (MP3 recommended, under 4 MB).",
         ]} />
       )}
 
