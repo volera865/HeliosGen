@@ -109,7 +109,7 @@ export function updateGeneration(
 
 export function recoverJob(
   taskId: string,
-): Pick<Generation, "status" | "video_url" | "image_url" | "image_urls" | "error_msg"> | null {
+): Pick<Generation, "status" | "video_url" | "image_url" | "image_urls" | "error_msg" | "user_id"> | null {
   return read().generations.find((g) => g.task_id === taskId) ?? null;
 }
 

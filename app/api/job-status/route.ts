@@ -1,13 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
 import { jobStore } from "@/lib/jobStore";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { GUEST_MODE } from "@/lib/guestMode";
+import { GUEST_MODE, GUEST_USER_ID } from "@/lib/guestMode";
 import * as guestDb from "@/lib/guest/db";
+import { createClient } from "@/lib/supabase/server";
 
-async function recoverJob(taskId: string): Promise<"done" | "error" | "pending" | "not_found"> {
+async function getAuthedUserId(req: NextRequest): Promise<string | null> {
+  if (GUEST_MODE) return GUEST_USER_ID;
+
+  // Cookie session first (EventSource / same-origin fetch cannot always send Bearer).
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user?.id) return user.id;
+  } catch {
+    // fall through to Bearer
+  }
+
+  const auth = req.headers.get("authorization") ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return null;
+  const { data } = await supabaseAdmin.auth.getUser(token);
+  return data.user?.id ?? null;
+}
+
+async function recoverJob(
+  taskId: string,
+  userId: string,
+): Promise<"done" | "error" | "pending" | "not_found" | "forbidden"> {
   if (GUEST_MODE) {
     const gen = guestDb.recoverJob(taskId);
     if (!gen) return "not_found";
+    if (gen.user_id && gen.user_id !== userId) return "forbidden";
     if (gen.status === "done") {
       const result = gen.video_url
         ? { status: "done" as const, videoUrl: gen.video_url }
@@ -24,11 +48,12 @@ async function recoverJob(taskId: string): Promise<"done" | "error" | "pending" 
 
   const { data: gen } = await supabaseAdmin
     .from("generations")
-    .select("status, video_url, image_url, image_urls, error_msg")
+    .select("status, video_url, image_url, image_urls, error_msg, user_id")
     .eq("task_id", taskId)
     .single();
 
   if (!gen) return "not_found";
+  if (gen.user_id !== userId) return "forbidden";
 
   if (gen.status === "done") {
     const result = gen.video_url
@@ -52,29 +77,31 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "taskId is required" }, { status: 400 });
   }
 
-  const result = jobStore.get(taskId);
-
-  // Only a settled entry can be trusted. A "pending" entry says nothing more
-  // than "this instance has not seen the callback" — another instance may
-  // already have written the terminal state to the generations row.
-  if (result && result.status !== "pending") {
-    return NextResponse.json(result);
+  const userId = await getAuthedUserId(req);
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Azure jobs have no Supabase record and can't be recovered.
+  // Azure jobs have no Supabase record — keep local jobStore behaviour after auth.
   if (taskId.startsWith("azure-")) {
+    const result = jobStore.get(taskId);
     return NextResponse.json(result ?? { status: "not_found" });
   }
 
-  const recovered = await recoverJob(taskId);
+  const recovered = await recoverJob(taskId, userId);
+  if (recovered === "forbidden" || recovered === "not_found") {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   if (recovered === "done" || recovered === "error") {
     return NextResponse.json(jobStore.get(taskId)!);
   }
 
-  if (recovered === "pending") {
-    return NextResponse.json({ status: "pending" });
+  // Pending in DB — only trust a non-pending in-memory entry for this user's job.
+  const result = jobStore.get(taskId);
+  if (result && result.status !== "pending") {
+    return NextResponse.json(result);
   }
 
-  return NextResponse.json(result ?? { status: "not_found" });
+  return NextResponse.json({ status: "pending" });
 }
