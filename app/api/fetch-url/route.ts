@@ -13,10 +13,21 @@ import * as guestDb from "@/lib/guest/db";
 
 export const maxDuration = 60;
 
-const MAX_BYTES = 50 * 1024 * 1024; // 50 MB
+const ALLOWED_MIMES = new Set([
+  "image/png", "image/jpeg", "image/webp", "image/gif",
+  "video/mp4", "video/webm", "video/quicktime",
+  "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/m4a",
+]);
+
+const MAX_BYTES = 4 * 1024 * 1024;
 
 export async function POST(req: NextRequest) {
   try {
+    const userId = await resolveUserId(req);
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { url } = await req.json() as { url?: string };
     if (!url || typeof url !== "string") {
       return NextResponse.json({ error: "Missing url" }, { status: 400 });
@@ -42,38 +53,34 @@ export async function POST(req: NextRequest) {
     }
 
     const contentType = upstream.headers.get("content-type") ?? "application/octet-stream";
-    const mimeType = contentType.split(";")[0].trim();
+    const mimeType = contentType.split(";")[0].trim().toLowerCase();
 
-    const isImage = mimeType.startsWith("image/");
-    const isVideo = mimeType.startsWith("video/");
-    if (!isImage && !isVideo) {
-      return NextResponse.json({ error: "URL does not point to an image or video" }, { status: 400 });
+    if (!ALLOWED_MIMES.has(mimeType)) {
+      return NextResponse.json({ error: `Unsupported media type: ${mimeType}` }, { status: 415 });
     }
 
     const buffer = Buffer.from(await upstream.arrayBuffer());
     if (buffer.byteLength > MAX_BYTES) {
-      return NextResponse.json({ error: "File exceeds 50 MB limit" }, { status: 413 });
+      return NextResponse.json({ error: "File exceeds 4 MB limit" }, { status: 413 });
     }
 
-    const folder = isVideo ? "references" : "uploads";
+    const isImage = mimeType.startsWith("image/");
+    const isVideo = mimeType.startsWith("video/");
+    const folder = isVideo || mimeType.startsWith("audio/") ? "references" : "uploads";
     const cdnUrl = await uploadBuffer(buffer, mimeType, folder);
     const mediaType: "image" | "video" = isImage ? "image" : "video";
 
-    // Record in user_uploads so it appears in the gallery "uploaded" section
-    const userId = await resolveUserId(req);
-    if (userId) {
-      if (GUEST_MODE) {
-        guestDb.insertUpload({ user_id: userId, r2_url: cdnUrl, mime_type: mimeType, source: "user_upload" });
-      } else {
-        supabaseAdmin.from("user_uploads").insert({
-          user_id:   userId,
-          r2_url:    cdnUrl,
-          mime_type: mimeType,
-          source:    "user_upload",
-        }).then(({ error }) => {
-          if (error) console.error("[fetch-url] db insert error:", error.message);
-        });
-      }
+    if (GUEST_MODE) {
+      guestDb.insertUpload({ user_id: userId, r2_url: cdnUrl, mime_type: mimeType, source: "user_upload" });
+    } else {
+      supabaseAdmin.from("user_uploads").insert({
+        user_id:   userId,
+        r2_url:    cdnUrl,
+        mime_type: mimeType,
+        source:    "user_upload",
+      }).then(({ error }) => {
+        if (error) console.error("[fetch-url] db insert error:", error.message);
+      });
     }
 
     return NextResponse.json({ cdnUrl, mediaType });

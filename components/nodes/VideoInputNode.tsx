@@ -10,7 +10,7 @@ import { sha256Hex } from "@/lib/assetHash";
 
 type VideoInputNodeType = Node<NodeData, "videoInputNode">;
 
-const MAX_BYTES = 100 * 1024 * 1024; // 100 MB
+const MAX_BYTES = 4 * 1024 * 1024; // 4 MB (Vercel body limit)
 const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 const IMAGE_HANDLES = new Set(["startFrame", "endFrame", "resource", "image"]);
 
@@ -400,7 +400,7 @@ export default function VideoInputNode({ id, data, selected }: NodeProps<VideoIn
     setUploadErr(null);
 
     if (!file.type.startsWith("video/")) { setUploadErr("Please select a video file"); return; }
-    if (file.size > MAX_BYTES) { setUploadErr("Video exceeds the 100 MB limit"); return; }
+    if (file.size > MAX_BYTES) { setUploadErr("Video exceeds the 4 MB limit"); return; }
 
     const bytes = await file.arrayBuffer();
     const hash  = await sha256Hex(bytes);
@@ -1412,7 +1412,7 @@ export default function VideoInputNode({ id, data, selected }: NodeProps<VideoIn
             <path d="m16 10-4-2.5v5L16 10z" fill="#22d3ee" stroke="none" />
           </svg>
           <p className="text-[11px] text-[#A0A0A0]">Drop video or{" "}<span className="underline underline-offset-2 text-white">browse</span></p>
-          <p className="text-[10px] text-[#4A4A45] mt-1">Max 100 MB</p>
+          <p className="text-[10px] text-[#4A4A45] mt-1">Max 4 MB</p>
         </div>
         {uploadErr && <p className="text-[10px] text-red-400 mt-1.5 text-center">{uploadErr}</p>}
       </div>

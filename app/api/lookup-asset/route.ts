@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { lookupAssetHash } from "@/lib/assetCache";
+import { resolveUserId } from "@/lib/guestMode";
 
 /**
  * GET /api/lookup-asset?hash=<sha256hex>
@@ -11,6 +12,11 @@ import { lookupAssetHash } from "@/lib/assetCache";
  * the upload entirely when the asset is already in R2.
  */
 export async function GET(req: NextRequest) {
+  const userId = await resolveUserId(req);
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const hash = req.nextUrl.searchParams.get("hash");
   if (!hash || !/^[0-9a-f]{64}$/i.test(hash)) {
     return NextResponse.json({ cdnUrl: null });
