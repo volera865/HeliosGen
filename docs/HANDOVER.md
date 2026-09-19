@@ -1,0 +1,184 @@
+# HeliosGen Cloud (Vercel) Handover
+
+Operational notes for deploying and operating the Cloud Mode build. Contains **no secrets** and **no real project URLs**.
+
+## 1. Environment variables
+
+### Required on Vercel (names only)
+
+| Name | Role |
+|------|------|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL (public) |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon key (public) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-only Supabase admin client |
+| `R2_ACCOUNT_ID` | Cloudflare R2 account |
+| `R2_ACCESS_KEY_ID` | R2 S3 access key |
+| `R2_SECRET_ACCESS_KEY` | R2 S3 secret |
+| `R2_BUCKET_NAME` | R2 bucket name |
+| `R2_PUBLIC_URL` | Public CDN base for uploaded objects |
+| `CALLBACK_BASE_URL` | Public site origin used to build kie.ai callbacks (`…/api/callback`) |
+
+### Optional / situational
+
+| Name | Role |
+|------|------|
+| `NEXT_PUBLIC_APP_URL` | Used as Referer for some proxy fetches |
+| `NEXT_PUBLIC_DEBUG` | Shows debug UI in Settings when `"true"` |
+| `VERCEL` | Set automatically by Vercel; forces guest mode off |
+
+### Must NOT be set on Vercel
+
+These break the security / cloud assumptions of this build:
+
+| Name | Why |
+|------|-----|
+| `GUEST_MODE` | Local-disk guest writes; forced off when `VERCEL` is set, but do not set it |
+| `NEXT_PUBLIC_GUEST_MODE` | Forced to `"false"` at build time on Vercel via `next.config.ts`; do not set `"true"` |
+| `NEXT_PUBLIC_DEMO_MODE` | Opens auth walls / demo shortcuts; leave unset |
+| `KIE_API_KEY` | Shared keys are retired; each user stores their own key |
+| `KIE_API_TOKEN` | Shared-key fallback removed from generate-video |
+| `AZURE_API_KEY` | Prefer per-user keys in Settings; shared env key is a footgun on a multi-tenant host |
+| `REPLICATE_API_TOKEN` | Legacy `generate-image` route is retired (410) |
+| `CODEX_HOME` | Codex CLI is host-only; unavailable on Vercel (501) |
+
+Users add their **own** kie.ai (and optional Azure) keys in Settings after invite sign-in.
+
+## 2. SQL to run (in order)
+
+1. `supabase-setup.sql` — core tables (`generations`, uploads, user settings, etc.)
+2. `supabase-folders.sql` — folders / folder_items
+
+Run both in the Supabase SQL editor against the project used by the Vercel env vars.
+
+## 3. Supabase dashboard settings (auth)
+
+### Site URL & redirects
+
+- **Site URL**: your Vercel production origin (no trailing path).
+- **Redirect URLs**: include  
+  `{SiteURL}/api/auth/callback`  
+  and the same for any preview origins you use.
+
+### Disable public sign-ups
+
+- Authentication → Providers → Email: **disable** “Enable sign ups” (or equivalent).
+- Access is invite-only; the UI no longer offers a sign-up tab.
+
+### Email templates
+
+Use **token_hash** links that hit the app callback (not the default Supabase hash-only URL).
+
+**Invite user** — Confirmation URL / link body should use:
+
+```text
+{{ .SiteURL }}/api/auth/callback?token_hash={{ .TokenHash }}&type=invite
+```
+
+**Reset Password** — Confirmation URL / link body should use:
+
+```text
+{{ .SiteURL }}/api/auth/callback?token_hash={{ .TokenHash }}&type=recovery
+```
+
+Example invite email body:
+
+```html
+<p>You have been invited to HeliosGen.</p>
+<p><a href="{{ .SiteURL }}/api/auth/callback?token_hash={{ .TokenHash }}&type=invite">Accept invitation</a></p>
+```
+
+Example reset email body:
+
+```html
+<p>Reset your HeliosGen password.</p>
+<p><a href="{{ .SiteURL }}/api/auth/callback?token_hash={{ .TokenHash }}&type=recovery">Reset password</a></p>
+```
+
+After verify, the callback redirects with `#type=recovery` so `components/AuthEvents.tsx` opens the set-password modal. Invite uses the same hash so the password screen opens.
+
+### Other dashboard checks
+
+- Confirm Email provider is enabled for invites / recovery.
+- OTP / link expiry long enough for invitees to accept.
+- No need to expose the service role key in the browser.
+
+## 4. Adding a new video model (`lib/modelConfig.ts`)
+
+Models are declared in `VIDEO_MODELS`. The UI and `/api/generate-video` read this file; you usually do not touch routes.
+
+Worked example — existing **Kling 3.0** entry (copy and adapt):
+
+```572:600:lib/modelConfig.ts
+    id: "kling-3.0",
+    apiId: "kling-3.0/video",
+    name: "Kling 3.0",
+    provider: "Kling",
+    ratios: ["16:9", "9:16", "1:1"],
+    durations: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    defaultDuration: 5,
+    defaultRatio: "9:16",
+    handles: ["prompt", "startFrame", "endFrame", "resource"],
+    sound: true,
+    modes: [
+      { value: "std", label: "720p" },
+      { value: "pro", label: "1080p" },
+      { value: "4K",  label: "4K"   },
+    ],
+    defaultMode: "pro",
+    apiInput: {
+      aspectRatioKey: "aspect_ratio",
+      durationKey: "duration",
+      durationAsString: true,
+      durationMin: 3,
+      durationMax: 15,
+      modeKey: "mode",
+      soundKey: "sound",
+      useImageUrls: true,
+      useKlingElements: true,
+      promptMaxLength: 2500,
+      extra: { multi_shots: false, multi_prompt: [], kling_elements: [] },
+    },
+```
+
+Steps:
+
+1. Copy a similar model block in `VIDEO_MODELS`.
+2. Set unique `id` (app) and `apiId` (kie.ai).
+3. Adjust `handles`, `durations`, `ratios`, and `apiInput` keys to match kie.ai’s payload.
+4. Redeploy. No schema change required.
+
+Header guidance in the same file (lines 1–6) says: add the entry — the UI and API routes pick it up automatically.
+
+## 5. Features unavailable on Vercel
+
+| Feature | Behaviour |
+|---------|-----------|
+| Trim video (`/api/trim-video`) | HTTP **501** `{ "error": "Not available in this deployment" }` |
+| Extract frame (`/api/extract-frame`) | HTTP **501** (same body) |
+| Codex login / status | HTTP **501** (same body) |
+| Guest / local-disk mode | Forced off when `VERCEL` is set |
+| Legacy Replicate `generate-image` | HTTP **410** `{ "error": "Removed" }` |
+
+### Upload size limits
+
+- Vercel request bodies are roughly **4.5 MB**.
+- Binary uploads (`upload-asset`, `upload-video`, `fetch-url`): capped at **~4 MB**.
+- JSON data-URL uploads (`upload-to-r2`): capped at **~3 MB decoded**.
+- Allowed MIME types: png, jpeg, webp, gif, mp4, webm, mov, mp3, wav, m4a (and matching audio MIME variants used by the allowlist).
+
+## 6. Troubleshooting
+
+| Symptom | Likely cause | What to check |
+|---------|--------------|---------------|
+| Jobs stay **pending** forever | Callback hit another instance / mirror failed / wrong `CALLBACK_BASE_URL` | Confirm callback URL is public HTTPS; job-status/stream recover from `generations`; R2 env complete |
+| **401** on generate / upload | Missing session or missing per-user kie key | Sign in; Settings → save kie.ai key; Bearer or cookie session present |
+| **429** from generate | kie.ai rate limit | Wait and retry; message: rate limiting — wait a few seconds |
+| Empty / insufficient **balance** | kie.ai account out of credits | Message: not enough credits — account owner adds credits |
+| Files not loading | Bad `R2_PUBLIC_URL`, allowlist, or CORS | CDN URL opens in browser; download allowlist includes R2 + kie hosts |
+| Invite / reset link problems | Wrong email template or Site URL | Templates must use `/api/auth/callback?token_hash=…&type=invite\|recovery`; Site URL matches deployment; `AuthEvents` mounted |
+
+## Notes for operators
+
+- Callback hardening: only updates rows that exist and are not already terminal; result URLs must be `https` on the download allowlist.
+- `fetch-url` uses `lib/safeFetch.ts` (https-only, private IP rejection, redirect checks, timeout, size cap).
+- `download` keeps its origin allowlist and does not open arbitrary hosts.
