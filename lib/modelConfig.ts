@@ -457,6 +457,11 @@ export interface VideoModel {
      * - without image → apiId (t2v), sends prompt + duration + aspect_ratio + resolution
      */
     useKlingTurbo?: boolean;
+    /**
+     * When true, uses Kling AI Avatar payload:
+     *   image_url (face) + audio_url + prompt only — no duration/aspect/resolution.
+     */
+    useKlingAiAvatar?: boolean;
   };
 }
 
@@ -622,6 +627,47 @@ export const VIDEO_MODELS: VideoModel[] = [
       resolutionKey: "resolution",
       promptMaxLength: 2500,
       useKlingTurbo: true,
+    },
+  },
+  // IDs per docs.kie.ai/market/kling/ai-avatar-standard and ai-avatar-pro; input is image_url, audio_url, prompt only.
+  {
+    id: "kling-ai-avatar-standard",
+    apiId: "kling/ai-avatar-standard",
+    name: "Kling AI Avatar (Standard)",
+    provider: "Kling",
+    ratios: [],
+    durations: [],
+    defaultDuration: 0,
+    defaultRatio: "9:16",
+    handles: ["prompt", "startFrame", "audioRef"],
+    requiredHandles: ["startFrame", "audioRef"],
+    sound: false,
+    promptOptional: true,
+    maxReferenceAudios: 1,
+    apiInput: {
+      durationMin: 0,
+      durationMax: 0,
+      useKlingAiAvatar: true,
+    },
+  },
+  {
+    id: "kling-ai-avatar-pro",
+    apiId: "kling/ai-avatar-pro",
+    name: "Kling AI Avatar (Pro)",
+    provider: "Kling",
+    ratios: [],
+    durations: [],
+    defaultDuration: 0,
+    defaultRatio: "9:16",
+    handles: ["prompt", "startFrame", "audioRef"],
+    requiredHandles: ["startFrame", "audioRef"],
+    sound: false,
+    promptOptional: true,
+    maxReferenceAudios: 1,
+    apiInput: {
+      durationMin: 0,
+      durationMax: 0,
+      useKlingAiAvatar: true,
     },
   },
   // ── X (Grok) ─────────────────────────────────────────────────────────────────
