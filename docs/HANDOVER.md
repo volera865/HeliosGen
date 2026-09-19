@@ -149,6 +149,33 @@ Steps:
 
 Header guidance in the same file (lines 1–6) says: add the entry — the UI and API routes pick it up automatically.
 
+### Adding a model whose payload differs (Kling AI Avatar)
+
+When kie.ai expects a different `input` shape (not duration/aspect/frames), three places change:
+
+1. **Model entry** — empty `ratios`/`durations`, `sound: false`, `handles: ["prompt", "startFrame", "audioRef"]`, `requiredHandles`, and `apiInput.useKlingAiAvatar` ([`lib/modelConfig.ts`](lib/modelConfig.ts) 632–671).
+
+```632:651:lib/modelConfig.ts
+  // IDs per docs.kie.ai/market/kling/ai-avatar-standard and ai-avatar-pro; input is image_url, audio_url, prompt only.
+  {
+    id: "kling-ai-avatar-standard",
+    apiId: "kling/ai-avatar-standard",
+    name: "Kling AI Avatar (Standard)",
+    ...
+    apiInput: {
+      durationMin: 0,
+      durationMax: 0,
+      useKlingAiAvatar: true,
+    },
+  },
+```
+
+2. **Payload branch** — early branch in [`app/api/generate-video/route.ts`](app/api/generate-video/route.ts) (94–116) sends only `{ image_url, audio_url, prompt }` and returns 400 if face or audio is missing / not https.
+
+3. **UI** — gallery Face/Audio slots + generate gating ([`app/gallery/page.tsx`](app/gallery/page.tsx) ~2634–2639, ~3893–3935); video node handle labels + hint ([`components/nodes/VideoGeneratorNode.tsx`](components/nodes/VideoGeneratorNode.tsx) 578–598, 1212–1217). Duration/aspect/sound stay hidden because those arrays are empty / `sound` is false.
+
+Note: the workflow canvas has no audio input node yet — gallery upload is the supported path for the audio file.
+
 ## 5. Features unavailable on Vercel
 
 | Feature | Behaviour |
