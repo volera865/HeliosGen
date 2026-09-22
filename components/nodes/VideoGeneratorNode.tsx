@@ -14,6 +14,14 @@ import { ShieldBan } from "lucide-react";
 import { VIDEO_MODELS as VIDEO_MODEL_CFG } from "@/lib/modelConfig";
 import { useGeneratingBorderAnimation } from "@/lib/useGeneratingBorderAnimation";
 import MissingInputWarning from "./MissingInputWarning";
+import { phaseLabel, phaseProgress, formatElapsed } from "@/lib/genProgress";
+import {
+  TALKING_VOICES,
+  parseTalkingVoice,
+  talkingVoiceStatus,
+  resolveTalkingRoute,
+  isSeedanceTalkingFamily,
+} from "@/lib/talkingPrompt";
 
 type VideoGeneratorNodeType = Node<NodeData, "videoGeneratorNode">;
 
@@ -210,6 +218,7 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
   const [durOpen, setDurOpen] = useState(false);
   const [modeOpen, setModeOpen] = useState(false);
   const [grokResOpen, setGrokResOpen] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const muted = useWorkflowStore((s) => s.globalMuted);
   const setGlobalMuted = useWorkflowStore((s) => s.setGlobalMuted);
   const [hovering, setHovering] = useState(false);
@@ -233,27 +242,27 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
   useEffect(() => {
     const rfNode = cardRef.current?.closest<HTMLElement>(".react-flow__node");
     if (!rfNode) return;
-    const anyOpen = modelOpen || ratioOpen || durOpen || modeOpen || grokResOpen;
+    const anyOpen = modelOpen || ratioOpen || durOpen || modeOpen || grokResOpen || voiceOpen;
     if (anyOpen) {
       rfNode.style.zIndex = "10000";
     } else {
       rfNode.style.zIndex = "";
     }
     return () => { rfNode.style.zIndex = ""; };
-  }, [modelOpen, ratioOpen, durOpen, modeOpen, grokResOpen]);
+  }, [modelOpen, ratioOpen, durOpen, modeOpen, grokResOpen, voiceOpen]);
 
   useEffect(() => {
-    const anyOpen = modelOpen || ratioOpen || durOpen || modeOpen || grokResOpen;
+    const anyOpen = modelOpen || ratioOpen || durOpen || modeOpen || grokResOpen || voiceOpen;
     if (!anyOpen) return;
     const handler = (e: MouseEvent) => {
       if (controlBarRef.current && !controlBarRef.current.contains(e.target as unknown as globalThis.Node)) {
         setModelOpen(false); setRatioOpen(false); setDurOpen(false);
-        setModeOpen(false); setGrokResOpen(false);
+        setModeOpen(false); setGrokResOpen(false); setVoiceOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [modelOpen, ratioOpen, durOpen, modeOpen, grokResOpen]);
+  }, [modelOpen, ratioOpen, durOpen, modeOpen, grokResOpen, voiceOpen]);
 
   const fmtTime = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
@@ -378,6 +387,7 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
   const duration = (data.duration as number) ?? cfg.defaultDuration;
   const aspectRatio = (data.aspectRatio as string) ?? cfg.defaultRatio;
   const sound = (data.sound as boolean) ?? false;
+  const talkingVoice = parseTalkingVoice(data.talkingVoice);
   const seed = (data.seed as number | undefined) ?? 0;
   const status = (data.status as string) ?? "idle";
   const prompt = (data.prompt as string) ?? "";
@@ -387,6 +397,14 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
   const animBusy = loading || status === "running";
   const busy = animBusy || isPending;
   const isQueued = !busy && !!data.pipelineQueued;
+  const progressPhase = data.progressPhase as string | undefined;
+  const [elapsedSec, setElapsedSec] = useState(0);
+  useEffect(() => {
+    if (status !== "running") { setElapsedSec(0); return; }
+    const t0 = Date.now();
+    const t = setInterval(() => setElapsedSec(Math.floor((Date.now() - t0) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [status, data.taskId]);
   useGeneratingBorderAnimation(cardRef, animBusy);
   const videoUrl = data.videoUrl as string | undefined;
   const capturedFrameUrl = data.capturedFrameUrl as string | undefined;
@@ -494,17 +512,70 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
 
       if (json.status === "done" && json.videoUrl) {
         gens[slot] = json.videoUrl;
-        updateNodeData(id, { status: "done", videoUrl: json.videoUrl, taskId: undefined, generations: gens, currentGenIdx: slot });
+        updateNodeData(id, { status: "done", videoUrl: json.videoUrl, taskId: undefined, progressPhase: undefined, generations: gens, currentGenIdx: slot });
       } else {
         const errMsg = json.error ?? "Generation failed";
         gens[slot] = { error: errMsg };
-        updateNodeData(id, { status: "error", errorMsg: errMsg, taskId: undefined, generations: gens, currentGenIdx: slot });
+        updateNodeData(id, { status: "error", errorMsg: errMsg, taskId: undefined, progressPhase: undefined, generations: gens, currentGenIdx: slot });
       }
     };
 
     es.onerror = () => es.close();
 
     return () => es.close();
+  }, [data.taskId, status, id, updateNodeData]);
+
+  // Live phase while the SSE wait is open — also recovers if the stream drops.
+  useEffect(() => {
+    const taskId = data.taskId as string | undefined;
+    if (!taskId || status !== "running") return;
+
+    let cancelled = false;
+    const deadline = Date.now() + 15 * 60 * 1000;
+
+    const doPoll = async () => {
+      try {
+        const res = await fetch(`/api/job-status?taskId=${taskId}`);
+        const json = await res.json() as { status: string; videoUrl?: string; error?: string; phase?: string };
+        if (cancelled) return;
+
+        if (json.status === "done" && json.videoUrl) {
+          const storeNode = useWorkflowStore.getState().nodes.find((n) => n.id === id);
+          const gens = [...((storeNode?.data?.generations as GenEntry[] | undefined) ?? [])] as GenEntry[];
+          const slot = (storeNode?.data?.currentGenIdx as number | undefined) ?? gens.length - 1;
+          gens[slot] = json.videoUrl;
+          updateNodeData(id, { status: "done", videoUrl: json.videoUrl, taskId: undefined, progressPhase: undefined, generations: gens, currentGenIdx: slot });
+          return;
+        }
+        if (json.status === "error") {
+          const errMsg = json.error ?? "Generation failed";
+          const storeNode = useWorkflowStore.getState().nodes.find((n) => n.id === id);
+          const gens = [...((storeNode?.data?.generations as GenEntry[] | undefined) ?? [])] as GenEntry[];
+          const slot = (storeNode?.data?.currentGenIdx as number | undefined) ?? gens.length - 1;
+          gens[slot] = { error: errMsg };
+          updateNodeData(id, { status: "error", errorMsg: errMsg, taskId: undefined, progressPhase: undefined, generations: gens, currentGenIdx: slot });
+          return;
+        }
+        if (json.status === "pending" && json.phase) {
+          const current = useWorkflowStore.getState().nodes.find((n) => n.id === id)?.data?.progressPhase;
+          if (json.phase !== current) updateNodeData(id, { progressPhase: json.phase });
+        }
+        if (Date.now() > deadline && json.status !== "done") {
+          const errMsg = "Timed out";
+          const storeNode = useWorkflowStore.getState().nodes.find((n) => n.id === id);
+          const gens = [...((storeNode?.data?.generations as GenEntry[] | undefined) ?? [])] as GenEntry[];
+          const slot = (storeNode?.data?.currentGenIdx as number | undefined) ?? gens.length - 1;
+          gens[slot] = { error: errMsg };
+          updateNodeData(id, { status: "error", errorMsg: errMsg, taskId: undefined, progressPhase: undefined, generations: gens, currentGenIdx: slot });
+        }
+      } catch {
+        // keep polling
+      }
+    };
+
+    doPoll();
+    const interval = setInterval(doPoll, 2000);
+    return () => { cancelled = true; clearInterval(interval); };
   }, [data.taskId, status, id, updateNodeData]);
 
   const activeHandles = new Set<string>(cfg.handles);
@@ -535,7 +606,7 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
   }
 
   // Seedance: first/last frames and multimodal references are mutually exclusive scenarios
-  if (cfg.id === "seedance-2-fast") {
+  if (isSeedanceTalkingFamily(videoModelId)) {
     const hasFrame = connectedHandles.has("startFrame") || connectedHandles.has("endFrame");
     const hasRef = connectedHandles.has("resource") || connectedHandles.has("referenceVideo") || connectedHandles.has("audioRef");
     if (hasFrame) {
@@ -603,7 +674,7 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
 
   const closeAll = () => {
     setModelOpen(false); setRatioOpen(false); setDurOpen(false);
-    setModeOpen(false); setGrokResOpen(false);
+    setModeOpen(false); setGrokResOpen(false); setVoiceOpen(false);
     setHovering(false);
   };
 
@@ -1031,6 +1102,9 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
       referenceVideoUrls: upstream.referenceVideoUrls.slice(0, maxRefVideos),
       referenceAudioUrls: upstream.referenceAudioUrls.slice(0, maxRefAudios),
       ...(cfg.supportsSeeds && seed ? { seed } : {}),
+      ...(isSeedanceTalkingFamily(videoModelId) && sound && upstream.referenceAudioUrls.length === 0 ? {
+        talkingVoice,
+      } : {}),
     };
 
     if (debugMode) {
@@ -1095,7 +1169,7 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
       }
     }, 3000);
   }, [id, nodes, edges, prompt, sound, seed, duration, aspectRatio, videoModelId, veoMode, isVeo,
-    mode, resolution, cfg, debugMode, textEdge, updateNodeData, setAuthModalOpen, flashEdgeError, kieKeySet, addToast]);
+    mode, resolution, cfg, debugMode, textEdge, updateNodeData, setAuthModalOpen, flashEdgeError, kieKeySet, addToast, talkingVoice]);
 
   const handleGenerateBatch = useCallback(() => {
     generate();
@@ -1643,7 +1717,8 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
                 </svg>
               )}
               <span className="text-[11px] font-medium" style={{ color: isPending ? "#888" : "#2DD4BF" }}>
-                {isPending ? "Pending" : "Generating…"}
+                {phaseLabel(progressPhase, isPending)}
+                {!isPending && elapsedSec > 0 ? ` · ${formatElapsed(elapsedSec)}` : ""}
               </span>
             </div>
             {isPending && (
@@ -1660,6 +1735,20 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
                 <span className="text-[11px] text-[#ccc] font-medium">Cancel</span>
               </button>
             )}
+          </div>
+        )}
+        {busy && generations[currentGenIdx] === null && (
+          <div className="absolute left-2 right-2 bottom-2 z-20 pointer-events-none">
+            <div className="h-[3px] rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.12)" }}>
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${phaseProgress(progressPhase, elapsedSec, isPending)}%`,
+                  background: isPending ? "rgba(255,255,255,0.35)" : "#2DD4BF",
+                  transition: "width 500ms ease",
+                }}
+              />
+            </div>
           </div>
         )}
 
@@ -1737,7 +1826,7 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
               <div className="flex items-center rounded-full" style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)", border: "1px solid rgba(255,255,255,0.07)" }}>
                 <button
                   onMouseDown={(e) => e.stopPropagation()}
-                  onClick={() => { setModeOpen((o) => !o); setModelOpen(false); setRatioOpen(false); setDurOpen(false); setGrokResOpen(false); }}
+                  onClick={() => { setModeOpen((o) => !o); setModelOpen(false); setRatioOpen(false); setDurOpen(false); setGrokResOpen(false); setVoiceOpen(false); }}
                   className="flex items-center gap-1.5 pl-2 pr-1.5 py-1 hover:brightness-125 transition-all whitespace-nowrap"
                 >
                   <span className="text-[11px] text-white/70">{cfg.modes.find((m) => m.value === mode)?.label ?? mode}</span>
@@ -1769,7 +1858,7 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
 
           const resPicker = cfg.resolutions ? (
             <div className="relative shrink-0">
-              <Pill onClick={() => { setGrokResOpen((o) => !o); setModelOpen(false); setRatioOpen(false); setDurOpen(false); setModeOpen(false); }}>
+              <Pill onClick={() => { setGrokResOpen((o) => !o); setModelOpen(false); setRatioOpen(false); setDurOpen(false); setModeOpen(false); setVoiceOpen(false); }}>
                 <span className="text-[11px] text-white/70">{resolution}</span>
                 <ChevronIcon open={grokResOpen} />
               </Pill>
@@ -1795,7 +1884,7 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
 
                 {/* Model */}
                 <div className="relative">
-                  <Pill onClick={() => { setModelOpen((o) => !o); setRatioOpen(false); setDurOpen(false); setModeOpen(false); setGrokResOpen(false); }}>
+                  <Pill onClick={() => { setModelOpen((o) => !o); setRatioOpen(false); setDurOpen(false); setModeOpen(false); setGrokResOpen(false); setVoiceOpen(false); }}>
                     <span className="shrink-0 text-white/60" style={{ lineHeight: 0 }}>
                       <NodeProviderIcon provider={cfg.provider} />
                     </span>
@@ -1867,7 +1956,7 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
                       className="shrink-0 flex items-center justify-center w-[20px] h-[20px] rounded-full border border-white/[0.07] bg-black/45 text-white/75 text-xs leading-none disabled:opacity-35 disabled:cursor-not-allowed hover:brightness-125 transition-all"
                       style={{ backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)" }}
                     >−</button>
-                    <Pill onClick={() => { setDurOpen((o) => !o); setModelOpen(false); setRatioOpen(false); setModeOpen(false); setGrokResOpen(false); }}>
+                    <Pill onClick={() => { setDurOpen((o) => !o); setModelOpen(false); setRatioOpen(false); setModeOpen(false); setGrokResOpen(false); setVoiceOpen(false); }}>
                       <span className="text-[11px] text-white/70 tabular-nums">{duration}s</span>
                       <ChevronIcon open={durOpen} />
                     </Pill>
@@ -1914,7 +2003,7 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
                 {/* Ratio */}
                 {ratios.length > 0 && (
                   <div className="relative">
-                    <Pill onClick={() => { setRatioOpen((o) => !o); setModelOpen(false); setDurOpen(false); setModeOpen(false); setGrokResOpen(false); }}>
+                    <Pill onClick={() => { setRatioOpen((o) => !o); setModelOpen(false); setDurOpen(false); setModeOpen(false); setGrokResOpen(false); setVoiceOpen(false); }}>
                       <AspectIcon ratio={aspectRatio} />
                       <span className="text-[11px] text-white/70">{aspectRatio}</span>
                       <ChevronIcon open={ratioOpen} />
@@ -1943,6 +2032,39 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
                     <ToggleSwitch on={sound} activeColor="#2dd4bf" />
                     <span className="text-[11px] text-white/70">Sound</span>
                   </button>
+                )}
+
+                {isSeedanceTalkingFamily(videoModelId) && sound && !connectedHandles.has("audioRef") && (
+                  <div className="relative shrink-0">
+                    <button
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={() => { setVoiceOpen((o) => !o); setModelOpen(false); setRatioOpen(false); setDurOpen(false); setModeOpen(false); setGrokResOpen(false); }}
+                      className="flex items-center gap-1.5 rounded-full px-2 py-1 transition-colors"
+                      style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)", border: "1px solid rgba(255,255,255,0.07)" }}
+                    >
+                      <span className="text-[11px] text-white/70">{TALKING_VOICES.find((v) => v.id === talkingVoice)?.label ?? "Woman"}</span>
+                      <ChevronIcon open={voiceOpen} />
+                    </button>
+                    <FloatMenu open={voiceOpen}>
+                      {TALKING_VOICES.map((v) => (
+                        <FloatItem key={v.id} active={talkingVoice === v.id} onClick={() => { updateNodeData(id, { talkingVoice: v.id }); setVoiceOpen(false); }}>
+                          {v.label}
+                        </FloatItem>
+                      ))}
+                    </FloatMenu>
+                  </div>
+                )}
+
+                {isSeedanceTalkingFamily(videoModelId) && (sound || connectedHandles.has("audioRef")) && (
+                  <span className="text-[11px] text-white/50 whitespace-nowrap px-1">
+                    {talkingVoiceStatus(
+                      resolveTalkingRoute({
+                        hasFace: connectedHandles.has("startFrame") || connectedHandles.has("resource"),
+                        hasAudio: connectedHandles.has("audioRef"),
+                      }),
+                      talkingVoice,
+                    )}
+                  </span>
                 )}
 
                 {/* Veo mode toggle */}

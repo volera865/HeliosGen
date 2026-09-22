@@ -6,6 +6,7 @@ import { hashBuffer, lookupAssetHash, storeAssetHash } from "./assetCache";
 import { GUEST_MODE } from "./guestMode";
 import { stripMetadata } from "./mediaMetadata";
 import * as localStore from "./guest/localStorage";
+import { extFromContentType, urlMatchesContentType } from "./mediaType";
 
 let _s3: S3Client | null = null;
 
@@ -27,15 +28,6 @@ function cdnUrl(key: string): string {
   return `${process.env.R2_PUBLIC_URL!.replace(/\/$/, "")}/${key}`;
 }
 
-function ext(contentType: string): string {
-  if (contentType.includes("mp4"))  return "mp4";
-  if (contentType.includes("webm")) return "webm";
-  if (contentType.includes("png"))  return "png";
-  if (contentType.includes("gif"))  return "gif";
-  if (contentType.includes("webp")) return "webp";
-  return "jpg";
-}
-
 /** Upload a Buffer to R2 (or local disk in guest mode) and return the public URL. */
 export async function uploadBuffer(
   buffer: Buffer,
@@ -46,9 +38,9 @@ export async function uploadBuffer(
   buffer = await stripMetadata(buffer, contentType);
   const hash = hashBuffer(buffer);
   const cached = await lookupAssetHash(hash);
-  if (cached) return cached;
+  if (cached && urlMatchesContentType(cached, contentType)) return cached;
 
-  const key = `${folder}/${randomUUID()}.${ext(contentType)}`;
+  const key = `${folder}/${randomUUID()}.${extFromContentType(contentType)}`;
   const url = cdnUrl(key);
 
   await getS3().send(

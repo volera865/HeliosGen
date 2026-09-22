@@ -13,6 +13,7 @@ import { getKieTokenForUser } from "@/lib/getKieToken";
 import { getAzureKeyForUser } from "@/lib/getAzureKey";
 import { GUEST_MODE, resolveUserId } from "@/lib/guestMode";
 import * as guestDb from "@/lib/guest/db";
+import { resolveKieCallBackUrl } from "@/lib/kieCallback";
 
 const BASE   = "https://api.kie.ai";
 const CREATE = `${BASE}/api/v1/jobs/createTask`;
@@ -517,10 +518,7 @@ export async function POST(req: NextRequest) {
   const kieToken = currentUserId ? await getKieTokenForUser(currentUserId) : null;
   if (!kieToken) return NextResponse.json({ error: "No Kie.ai API key configured. Add one in Settings." }, { status: 401 });
 
-  const callbackBase = process.env.CALLBACK_BASE_URL;
-  if (!callbackBase) return NextResponse.json({ error: "CALLBACK_BASE_URL is not set" }, { status: 500 });
-
-  const callBackUrl = `${callbackBase.replace(/\/$/, "")}/api/callback`;
+  const callBackUrl = resolveKieCallBackUrl();
 
   try {
     const { apiInput } = cfg;
@@ -543,7 +541,8 @@ export async function POST(req: NextRequest) {
     }
     if (apiInput.extra) Object.assign(input, apiInput.extra);
 
-    const requestBody = { model: resolvedApiId, callBackUrl, input };
+    const requestBody: Record<string, unknown> = { model: resolvedApiId, input };
+    if (callBackUrl) requestBody.callBackUrl = callBackUrl;
 
     const res = await fetch(CREATE, {
       method:  "POST",
@@ -562,7 +561,7 @@ export async function POST(req: NextRequest) {
     const taskId = d.data?.taskId ?? d.data?.id ?? d.taskId ?? d.id;
     if (!taskId) throw new Error("No task ID in response");
 
-    jobStore.set(taskId, { status: "pending", userId: currentUserId ?? undefined });
+    jobStore.set(taskId, { status: "pending", type: "image", userId: currentUserId ?? undefined });
 
     if (GUEST_MODE) {
       guestDb.insertGeneration({

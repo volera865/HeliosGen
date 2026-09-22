@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { jobStore } from "@/lib/jobStore";
 import { ensureR2 } from "@/lib/r2";
 import { supabaseAdmin } from "@/lib/supabase/admin";
@@ -6,6 +6,15 @@ import { VIDEO_MODELS } from "@/lib/modelConfig";
 import { getKieTokenForUser } from "@/lib/getKieToken";
 import { GUEST_MODE, resolveUserId } from "@/lib/guestMode";
 import * as guestDb from "@/lib/guest/db";
+import { resolveKieCallBackUrl } from "@/lib/kieCallback";
+import {
+  parseTalkingVoice,
+  resolveTalkingRoute,
+  talkingModelForRoute,
+  wrapTalkingPrompt,
+  isSeedanceTalkingFamily,
+} from "@/lib/talkingPrompt";
+import { runTalkingPipeline, talkingParentId } from "@/lib/talkingPipeline";
 
 const KIE_BASE = "https://api.kie.ai";
 
@@ -24,18 +33,18 @@ interface KlingElementInput {
 export async function POST(req: NextRequest) {
   try {
   const body = await req.json();
+  let videoModel: string = body.videoModel || body.model || "kling-3.0";
+  let prompt: string | undefined = body.prompt;
+  let rawStartFrame: string | undefined = body.startFrameUrl;
+  let rawEndFrame: string | undefined = body.endFrameUrl;
+  let rawRefImages: string[] = body.referenceImageUrls || body.imageUrls || [];
+  let sound: boolean = body.sound ?? false;
   const {
-    videoModel      = body.model || "kling-3.0",
-    prompt,
-    startFrameUrl:  rawStartFrame,
-    endFrameUrl:    rawEndFrame,
     videoRefUrl:    rawVideoRef,
     resources       = [] as Resource[],
     klingElements   = [] as KlingElementInput[],
-    referenceImageUrls:  rawRefImages     = body.imageUrls || [] as string[],
     referenceVideoUrls:  rawRefVideoUrls  = [] as string[],
     referenceAudioUrls:  rawRefAudioUrls  = [] as string[],
-    sound           = false,
     duration        = 5,
     aspectRatio     = body.aspect_ratio || "16:9",
     mode            = "pro",
@@ -45,16 +54,96 @@ export async function POST(req: NextRequest) {
     generationType: rawGenerationType,
     callBackUrl:    rawCallBackUrl,
     debugOnly       = false,
+    talkingMode     = false,
+    talkingVoice:   rawTalkingVoice,
   } = body;
+
+  const hasFace = !!(rawStartFrame && String(rawStartFrame).trim())
+    || (Array.isArray(rawRefImages) && rawRefImages.length > 0);
+  const hasAudio = Array.isArray(rawRefAudioUrls) && rawRefAudioUrls.length > 0;
+  const voice = parseTalkingVoice(rawTalkingVoice);
+
+  if (talkingMode) {
+    const route = resolveTalkingRoute({ hasFace, hasAudio });
+    videoModel = talkingModelForRoute(route);
+    prompt = wrapTalkingPrompt(String(prompt ?? ""), { route, voice, hasFace });
+    if (route === "generate") {
+      sound = true;
+      if (!rawStartFrame && rawRefImages[0]) rawStartFrame = rawRefImages[0];
+      rawEndFrame = undefined;
+    }
+    if (route === "lip-sync" && !rawStartFrame && rawRefImages[0]) {
+      rawStartFrame = rawRefImages[0];
+    }
+    if (route === "audio-only") {
+      rawStartFrame = undefined;
+      rawEndFrame = undefined;
+      rawRefImages = [];
+      sound = false;
+    }
+  } else if (rawTalkingVoice && isSeedanceTalkingFamily(videoModel) && !hasAudio) {
+    sound = true;
+    prompt = wrapTalkingPrompt(String(prompt ?? ""), { route: "generate", voice, hasFace });
+    if (!rawStartFrame && rawRefImages[0]) rawStartFrame = rawRefImages[0];
+  }
 
   const userId = await resolveUserId(req);
 
   const apiKey = userId ? await getKieTokenForUser(userId) : null;
   if (!apiKey) return NextResponse.json({ error: "No Kie.ai API key configured. Add one in Settings." }, { status: 401 });
 
-  const callbackBase = process.env.CALLBACK_BASE_URL;
-  const callBackUrl = rawCallBackUrl || (callbackBase ? `${callbackBase.replace(/\/$/, "")}/api/callback` : undefined);
-  if (!callBackUrl) return NextResponse.json({ error: "callBackUrl or CALLBACK_BASE_URL not set" }, { status: 500 });
+  if (talkingMode) {
+    const topic = String(body.prompt ?? "");
+    let faceUrl = (rawStartFrame && String(rawStartFrame).trim()) || rawRefImages[0] || undefined;
+    let audioUrl = Array.isArray(rawRefAudioUrls) && rawRefAudioUrls[0] ? String(rawRefAudioUrls[0]) : undefined;
+    if (!audioUrl && !topic.trim()) {
+      return NextResponse.json({ error: "Describe what they should say, or upload audio." }, { status: 400 });
+    }
+    if (faceUrl) {
+      const resolved = await ensureR2(faceUrl, "references").catch(() => faceUrl);
+      faceUrl = typeof resolved === "string" ? resolved : faceUrl;
+    }
+    if (audioUrl) {
+      const resolved = await ensureR2(audioUrl, "references").catch(() => audioUrl);
+      audioUrl = typeof resolved === "string" ? resolved : audioUrl;
+    }
+    const parentId = talkingParentId();
+    const phase = audioUrl ? (faceUrl ? "lip-sync" : "generating") : "creating-voice";
+    const displayModel = faceUrl ? "kling-ai-avatar-standard" : "seedance-2-5";
+    jobStore.set(parentId, { status: "pending", type: "video", userId: userId ?? undefined, phase });
+    const refs = [faceUrl, audioUrl].filter((u): u is string => !!u);
+    if (GUEST_MODE) {
+      guestDb.insertGeneration({
+        task_id: parentId, user_id: userId, generation_type: "video",
+        status: "pending", model: displayModel, prompt: topic,
+        aspect_ratio: aspectRatio, duration: Number(duration) || 5,
+        kling_mode: mode, sound: true, reference_image_urls: refs,
+      });
+    } else {
+      supabaseAdmin.from("generations").insert({
+        task_id: parentId, user_id: userId, generation_type: "video",
+        status: "pending", model: displayModel, prompt: topic,
+        aspect_ratio: aspectRatio, duration: Number(duration) || 5,
+        kling_mode: mode, sound: true, reference_image_urls: refs,
+      }).then(({ error }) => {
+        if (error) console.error("[generate-video] talking insert error:", error.message);
+      });
+    }
+    after(() => runTalkingPipeline({
+      parentId,
+      apiKey,
+      userId: userId ?? undefined,
+      topic,
+      voice,
+      faceUrl,
+      audioUrl,
+      aspectRatio,
+      duration: Number(duration) || 5,
+    }));
+    return NextResponse.json({ taskId: parentId });
+  }
+
+  const callBackUrl = rawCallBackUrl || resolveKieCallBackUrl();
 
   const cfg = VIDEO_MODELS.find((m) => m.id === videoModel);
   if (!cfg) return NextResponse.json({ error: `Unknown video model: ${videoModel}` }, { status: 400 });
@@ -62,7 +151,11 @@ export async function POST(req: NextRequest) {
   const resolution = rawResolution || cfg.defaultResolution || "480p";
   const { apiInput } = cfg;
   const isSeedance25EditModel = cfg.id === "seedance-2-5-edit";
-  const effectiveAspectRatio = isSeedance25EditModel ? "adaptive" : aspectRatio;
+  const seedanceHasEndpointFrame = isSeedanceTalkingFamily(videoModel)
+    && !!(rawStartFrame || rawEndFrame);
+  const effectiveAspectRatio = isSeedance25EditModel || seedanceHasEndpointFrame
+    ? "adaptive"
+    : aspectRatio;
 
   // Clamp duration to model limits (motion-control has no duration field)
   const clampedDuration = isSeedance25EditModel
@@ -99,6 +192,9 @@ export async function POST(req: NextRequest) {
     if (!rawStartFrame || !rawAudio) {
       return NextResponse.json({ error: avatarErr }, { status: 400 });
     }
+    if (!String(prompt ?? "").trim()) {
+      return NextResponse.json({ error: "Kling AI Avatar needs a prompt." }, { status: 400 });
+    }
     const [imageUrl, audioUrl] = await Promise.all([
       ensureR2(rawStartFrame, "references").catch(() => rawStartFrame),
       ensureR2(rawAudio, "references").catch(() => rawAudio),
@@ -112,7 +208,7 @@ export async function POST(req: NextRequest) {
     input = {
       image_url: imageUrl,
       audio_url: audioUrl,
-      prompt:    prompt ?? "",
+      prompt:    String(prompt).trim(),
     };
 
   } else if (apiInput.firstFrameKey) {
@@ -132,13 +228,17 @@ export async function POST(req: NextRequest) {
 
     if (prompt?.trim())                                        input.prompt                       = prompt;
     if (apiInput.firstFrameKey  && startFrameUrl)              input[apiInput.firstFrameKey]       = startFrameUrl;
-    if (apiInput.lastFrameKey   && endFrameUrl)                input[apiInput.lastFrameKey]        = endFrameUrl;
+    // last_frame_url cannot be sent alone
+    if (apiInput.lastFrameKey && endFrameUrl && startFrameUrl) input[apiInput.lastFrameKey]        = endFrameUrl;
     if (apiInput.resolutionKey)                                input[apiInput.resolutionKey]       = resolution;
     if (apiInput.soundKey)                                     input[apiInput.soundKey]            = Boolean(sound);
-    // Seedance (and similar): first/last frames and reference images are mutually exclusive
-    if (apiInput.referenceImagesKey && r2RefImages.length > 0 && !startFrameUrl && !endFrameUrl) input[apiInput.referenceImagesKey]  = r2RefImages;
-    if (apiInput.referenceVideosKey && r2RefVideos.length > 0) input[apiInput.referenceVideosKey]  = r2RefVideos;
-    if (apiInput.referenceAudiosKey && r2RefAudios.length > 0) input[apiInput.referenceAudiosKey]  = r2RefAudios;
+    // Official Seedance rule: first/last-frame jobs cannot include any reference_* lists
+    const seedanceUsesEndpointFrames = !!(startFrameUrl || endFrameUrl);
+    if (!seedanceUsesEndpointFrames) {
+      if (apiInput.referenceImagesKey && r2RefImages.length > 0) input[apiInput.referenceImagesKey] = r2RefImages;
+      if (apiInput.referenceVideosKey && r2RefVideos.length > 0) input[apiInput.referenceVideosKey] = r2RefVideos;
+      if (apiInput.referenceAudiosKey && r2RefAudios.length > 0) input[apiInput.referenceAudiosKey] = r2RefAudios;
+    }
     if (apiInput.extra)                                        Object.assign(input, apiInput.extra);
 
   } else if (apiInput.useHappyHorse) {
@@ -248,7 +348,7 @@ export async function POST(req: NextRequest) {
       watermark: "",
       enableFallback: false,
       enableTranslation: true,
-      callBackUrl,
+      ...(callBackUrl ? { callBackUrl } : {}),
     };
     if (apiInput.extra) Object.assign(input, apiInput.extra);
 
@@ -370,7 +470,7 @@ export async function POST(req: NextRequest) {
 
   const kieBody = apiInput.useGoogleVeo
     ? { model: effectiveApiId, ...input }
-    : { model: effectiveApiId, callBackUrl, input };
+    : { model: effectiveApiId, input, ...(callBackUrl ? { callBackUrl } : {}) };
 
   // Debug mode — log payload to server console and return without submitting
   if (debugOnly) {

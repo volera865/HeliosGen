@@ -5,6 +5,7 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import { GUEST_MODE, GUEST_USER_ID } from "@/lib/guestMode";
 import * as guestDb from "@/lib/guest/db";
 import { createClient } from "@/lib/supabase/server";
+import { syncPendingKieJob } from "@/lib/kieJobSync";
 
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
@@ -59,7 +60,7 @@ async function recoverJob(
 
   const { data: gen } = await supabaseAdmin
     .from("generations")
-    .select("status, video_url, image_url, image_urls, error_msg, user_id")
+    .select("status, video_url, image_url, image_urls, error_msg, user_id, generation_type")
     .eq("task_id", taskId)
     .single();
 
@@ -85,6 +86,7 @@ export async function GET(req: NextRequest) {
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
   const isAzure = taskId.startsWith("azure-");
+  const isTalkPipeline = taskId.startsWith("talk-");
 
   if (isAzure) {
     const existing = jobStore.get(taskId);
@@ -103,7 +105,12 @@ export async function GET(req: NextRequest) {
 
     const existing = jobStore.get(taskId);
     if (existing && existing.status !== "pending") return immediate(existing);
-    // Pending owned job — open SSE + DB poll below
+
+    if (!isTalkPipeline) {
+      const synced = await syncPendingKieJob(taskId, userId);
+      if (synced && synced.status !== "pending") return immediate(synced);
+    }
+    // Pending owned job — open SSE + Kie poll below
   }
 
   const stream = new ReadableStream({
@@ -131,18 +138,27 @@ export async function GET(req: NextRequest) {
       }, 25_000);
 
       let polling = false;
-      const dbPoll = setInterval(() => {
+      const pollKie = () => {
         if (closed || polling || isAzure) return;
         polling = true;
         recoverJob(taskId, userId)
-          .then((settled) => {
-            if (!settled || settled === "forbidden" || settled === "not_found" || closed) return;
+          .then(async (settled) => {
+            if (settled === "forbidden" || settled === "not_found" || closed) return;
+            if (!settled) {
+              if (isTalkPipeline) return;
+              const synced = await syncPendingKieJob(taskId, userId);
+              if (!synced || synced.status === "pending" || closed) return;
+              send(synced);
+              return;
+            }
             jobStore.set(taskId, settled);
             send(settled);
           })
-          .catch(() => { /* transient DB error — try again next tick */ })
+          .catch(() => { /* transient DB / Kie error — try again next tick */ })
           .finally(() => { polling = false; });
-      }, DB_POLL_MS);
+      };
+      const dbPoll = setInterval(pollKie, DB_POLL_MS);
+      pollKie();
 
       const timeout = setTimeout(() => {
         send({ status: "error", error: "Generation timed out" });

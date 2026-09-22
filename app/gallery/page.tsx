@@ -17,6 +17,19 @@ import DotCanvasBackground from "@/components/ui/DotCanvasBackground";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { Button } from "@/components/ui/button";
 import { browserNotify, requestNotificationPermission } from "@/lib/browserNotify";
+import { phaseLabel, phaseProgress, formatElapsed } from "@/lib/genProgress";
+import {
+  TALKING_VOICES,
+  TALKING_GENERATE_MODEL,
+  parseTalkingVoice,
+  resolveTalkingRoute,
+  talkingRouteLabel,
+  talkingModelForRoute,
+  talkingVoiceStatus,
+  talkingPipelineHelper,
+  isSeedanceTalkingFamily,
+  type TalkingVoice,
+} from "@/lib/talkingPrompt";
 
 const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 
@@ -434,6 +447,7 @@ interface PendingGen {
   prePending?: boolean;
   retried?: boolean;
   folderId?: string | null;
+  phase?: string;
 }
 
 
@@ -659,6 +673,8 @@ interface SavedSettings {
   prompt: string; modelId: string; aspectRatio: string;
   quality: string; count: number; duration: number; mode: string;
   sound?: boolean;
+  talkingMode?: boolean;
+  talkingVoice?: TalkingVoice;
   refImageUrls?: string[];
   azureResolution?: string;
   azureCustomWidth?: number;
@@ -714,6 +730,16 @@ function saveKlingElements(elements: KlingElement[]) {
 // ── Pending generation tile (needs hooks, must be a component) ────────────────
 
 function PendingGenTile({ pg, onCancel }: { pg: PendingGen; onCancel: () => void }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const elapsedSec = pg.createdAt ? Math.max(0, Math.floor((now - new Date(pg.createdAt).getTime()) / 1000)) : 0;
+  const label = phaseLabel(pg.phase, pg.prePending);
+  const pct = phaseProgress(pg.phase, elapsedSec, pg.prePending);
+  const elapsed = formatElapsed(elapsedSec);
+
   return (
     <>
       {/* Top radial glow — blue-emerald with slow pulse */}
@@ -750,7 +776,8 @@ function PendingGenTile({ pg, onCancel }: { pg: PendingGen; onCancel: () => void
             </svg>
           )}
           <span style={{ fontSize: "11px", color: pg.prePending ? "#888" : "#2DD4BF", fontWeight: 500 }}>
-            {pg.prePending ? "Pending" : "Generating…"}
+            {label}
+            {!pg.prePending && elapsedSec > 0 ? ` · ${elapsed}` : ""}
           </span>
         </div>
 
@@ -778,12 +805,21 @@ function PendingGenTile({ pg, onCancel }: { pg: PendingGen; onCancel: () => void
         )}
       </div>
 
-      {/* Bottom: prompt */}
-      {pg.prompt && (
-        <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: "24px 10px 10px", background: "linear-gradient(to top, rgba(0,0,0,0.6) 0%, transparent 100%)" }}>
-          <p style={{ margin: 0, fontSize: "11px", color: "rgba(255,255,255,0.35)", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{pg.prompt}</p>
+      {/* Bottom: progress + prompt */}
+      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: pg.prompt ? "24px 10px 10px" : "12px 10px 10px", background: "linear-gradient(to top, rgba(0,0,0,0.6) 0%, transparent 100%)" }}>
+        <div style={{ height: 3, borderRadius: 999, background: "rgba(255,255,255,0.12)", overflow: "hidden", marginBottom: pg.prompt ? 8 : 0 }}>
+          <div style={{
+            height: "100%",
+            width: `${pct}%`,
+            borderRadius: 999,
+            background: pg.prePending ? "rgba(255,255,255,0.35)" : "#2DD4BF",
+            transition: "width 500ms ease",
+          }} />
         </div>
-      )}
+        {pg.prompt && (
+          <p style={{ margin: 0, fontSize: "11px", color: "rgba(255,255,255,0.35)", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{pg.prompt}</p>
+        )}
+      </div>
     </>
   );
 }
@@ -1021,6 +1057,8 @@ function GalleryInner() {
   const [resolution, setResolution] = useState<string>("");
   const [azureResolution, setAzureResolution] = useState<string>(() => loadSettings(tab, selectedFolderId)?.azureResolution ?? "1k");
   const [sound, setSound] = useState<boolean>(() => loadSettings(tab, selectedFolderId)?.sound ?? false);
+  const [talkingMode, setTalkingMode] = useState<boolean>(() => loadSettings(tab, selectedFolderId)?.talkingMode ?? false);
+  const [talkingVoice, setTalkingVoice] = useState<TalkingVoice>(() => parseTalkingVoice(loadSettings(tab, selectedFolderId)?.talkingVoice));
   const [seed, setSeed] = useState<number | undefined>(0);
   const [durPickerOpen, setDurPickerOpen] = useState(false);
   const [durPickerClosing, setDurPickerClosing] = useState(false);
@@ -1306,7 +1344,7 @@ function GalleryInner() {
       try {
         // Check immediately (no 3s delay) before entering the regular poll loop
         const immediateRes = await fetch(`/api/job-status?taskId=${pending.taskId!}`);
-        const immediateResult = await immediateRes.json() as { status: string; error?: string };
+        const immediateResult = await immediateRes.json() as { status: string; error?: string; phase?: string };
         if (immediateResult.status === "error") throw new Error(immediateResult.error ?? "Generation failed");
         if (immediateResult.status === "not_found") {
           // Task expired from server memory — image was likely already saved; just remove the spinner
@@ -1314,7 +1352,9 @@ function GalleryInner() {
           return;
         }
         if (immediateResult.status !== "done") {
-          // Still generating — enter the regular poll loop
+          if (immediateResult.phase) {
+            setPendingGens(prev => prev.map(p => p.id === pending.id ? { ...p, phase: immediateResult.phase } : p));
+          }
           await pollTask(pending.taskId!);
         }
         const existingIds = new Set((galleryCache.get(`${tabRef.current}-generation`)?.items ?? []).map((i: GalleryItem) => i.id));
@@ -1505,6 +1545,8 @@ function GalleryInner() {
     if ("defaultMode" in model) setMode(saved?.mode ?? (model as { defaultMode: string }).defaultMode ?? "");
     if ("defaultResolution" in model) setResolution((model as { defaultResolution: string }).defaultResolution);
     setSound(saved?.sound ?? false);
+    setTalkingMode(saved?.talkingMode ?? false);
+    setTalkingVoice(parseTalkingVoice(saved?.talkingVoice));
     const savedUrls = saved?.refImageUrls ?? [];
     const savedPrompt = resolvedPrompt;
     setRefImages(prev => {
@@ -1653,7 +1695,7 @@ function GalleryInner() {
       .map(r => r.cdnUrl!))];
     const readyCdnUrl = (r: RefImage) => !r.uploading && !r.error && !!r.cdnUrl;
     const s: SavedSettings = {
-      prompt, modelId, aspectRatio, quality, count, duration, mode, sound, refImageUrls, azureResolution, azureCustomWidth, azureCustomHeight, promptTextMode, multiPromptMode,
+      prompt, modelId, aspectRatio, quality, count, duration, mode, sound, talkingMode, talkingVoice, refImageUrls, azureResolution, azureCustomWidth, azureCustomHeight, promptTextMode, multiPromptMode,
       vidStartFrameUrl: vidStartFrame?.cdnUrl ?? null,
       vidEndFrameUrl: vidEndFrame?.cdnUrl ?? null,
       vidResourceUrls: vidResources.filter(readyCdnUrl).map(r => r.cdnUrl!),
@@ -1665,7 +1707,7 @@ function GalleryInner() {
     };
     settingsSnapshotRef.current = s;
     saveSettings(tab, prevFolderIdRef.current, s);
-  }, [tab, prompt, modelId, aspectRatio, quality, count, duration, mode, sound, refImages, azureResolution, azureCustomWidth, azureCustomHeight, promptTextMode, multiPromptMode, vidStartFrame, vidEndFrame, vidResources, vidVideoRef, vidRefVideos, vidRefAudios, vidElements, taggedImages]);
+  }, [tab, prompt, modelId, aspectRatio, quality, count, duration, mode, sound, talkingMode, talkingVoice, refImages, azureResolution, azureCustomWidth, azureCustomHeight, promptTextMode, multiPromptMode, vidStartFrame, vidEndFrame, vidResources, vidVideoRef, vidRefVideos, vidRefAudios, vidElements, taggedImages]);
 
   // Save/restore all settings when switching folders
   useEffect(() => {
@@ -1694,6 +1736,8 @@ function GalleryInner() {
     if ("defaultDuration" in model) setDuration(saved?.duration ?? (model as { defaultDuration: number }).defaultDuration ?? 5);
     if ("defaultMode" in model) setMode(saved?.mode ?? (model as { defaultMode: string }).defaultMode ?? "");
     setSound(saved?.sound ?? false);
+    setTalkingMode(saved?.talkingMode ?? false);
+    setTalkingVoice(parseTalkingVoice(saved?.talkingVoice));
     setAzureResolution(saved?.azureResolution ?? "1k");
     setPromptTextMode(saved?.promptTextMode ?? "text");
     setMultiPromptMode(saved?.multiPromptMode ?? false);
@@ -1870,7 +1914,7 @@ function GalleryInner() {
       error: false,
     }));
 
-    const isSeedanceModel = modelId === "seedance-2" || modelId === "seedance-2-fast";
+    const isSeedanceModel = !talkingMode && isSeedanceTalkingFamily(modelId);
     if (isSingle) {
       const [entry] = newEntries;
       if (target === "startFrame") {
@@ -1978,7 +2022,7 @@ function GalleryInner() {
     }
     const isDup = (slots: RefImage[]) => slots.some(r => r.cdnUrl === url || r.objectUrl === url);
 
-    const isSeedancePicker = modelId === "seedance-2" || modelId === "seedance-2-fast";
+    const isSeedancePicker = !talkingMode && isSeedanceTalkingFamily(modelId);
     if (target === "resource") {
       if (isDup(vidResources)) return;
       if (modelId === "happyhorse") setVidStartFrame(null);
@@ -2077,6 +2121,35 @@ function GalleryInner() {
       const handles = vm?.handles ?? [];
 
       const { resolvedPrompt, extraAssets } = resolveGalleryMentions(effectivePrompt, taggedImages, vm?.resourceTagFormat ?? "default");
+
+      if (talkingMode) {
+        const faceUrl = vidStartFrame?.cdnUrl && !vidStartFrame.error ? vidStartFrame.cdnUrl : undefined;
+        const taggedAudioUrls = extraAssets.filter(a => a.kind === "audio").map(a => a.url);
+        const extraAudioSet = new Set(taggedAudioUrls);
+        const audioUrls = [
+          ...taggedAudioUrls,
+          ...vidRefAudios.filter(r => r.cdnUrl && !r.error && !extraAudioSet.has(r.cdnUrl!)).map(r => r.cdnUrl!),
+        ];
+        const res = await fetch("/api/generate-video", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            talkingMode: true,
+            talkingVoice,
+            prompt: resolvedPrompt,
+            aspectRatio,
+            duration,
+            sound: true,
+            ...(faceUrl ? { startFrameUrl: faceUrl } : {}),
+            ...(audioUrls.length > 0 ? { referenceAudioUrls: audioUrls } : {}),
+          }),
+        });
+        const text = await res.text();
+        let d: { taskId?: string; error?: string } = {};
+        try { d = JSON.parse(text); } catch { throw new Error(res.ok ? "Invalid server response" : `Server error ${res.status}`); }
+        if (!res.ok) throw new Error(d.error ?? `Server error ${res.status}`);
+        return d.taskId!;
+      }
 
       const startFrameUrl = handles.includes("startFrame") && vidStartFrame?.cdnUrl ? vidStartFrame.cdnUrl : undefined;
       const endFrameUrl   = handles.includes("endFrame")   && vidEndFrame?.cdnUrl   ? vidEndFrame.cdnUrl   : undefined;
@@ -2192,12 +2265,15 @@ function GalleryInner() {
       document.addEventListener("visibilitychange", onVisible);
     });
 
-    for (let i = 0; i < 150; i++) {
-      await waitOrVisible(3_000);
+    for (let i = 0; i < 450; i++) {
+      if (i > 0) await waitOrVisible(2_000);
       const poll = await fetch(`/api/job-status?taskId=${taskId}`);
-      const result = await poll.json() as { status: string; error?: string };
+      const result = await poll.json() as { status: string; error?: string; phase?: string };
       if (result.status === "done") return;
       if (result.status === "error") throw new Error(result.error ?? "Generation failed");
+      if (result.phase) {
+        setPendingGens(prev => prev.map(p => p.taskId === taskId && p.phase !== result.phase ? { ...p, phase: result.phase } : p));
+      }
     }
     throw new Error("Timed out");
   };
@@ -2210,7 +2286,7 @@ function GalleryInner() {
     if (isVideo && [vidStartFrame, vidEndFrame, vidVideoRef, ...vidResources, ...vidRefVideos, ...vidRefAudios].some(r => r?.uploading)) {
       setGenError("References still uploading…"); setTimeout(() => setGenError(""), 3_000); return;
     }
-    if (isVideo) {
+    if (isVideo && !talkingMode) {
       const vm = VIDEO_MODELS.find(m => m.id === modelId);
       if (vm?.requiredHandles?.length) {
         const handleHasContent = (h: string) => {
@@ -2312,7 +2388,7 @@ function GalleryInner() {
       if (active.length === 0) return;
 
       const activeIds = new Set(active.map(p => p.id));
-      setPendingGens(prev => prev.map(p => activeIds.has(p.id) ? { ...p, prePending: false } : p));
+      setPendingGens(prev => prev.map(p => activeIds.has(p.id) ? { ...p, prePending: false, phase: "queued" } : p));
 
       const token = await getToken();
       if (!token) {
@@ -2600,14 +2676,30 @@ function GalleryInner() {
   // ── Derived ───────────────────────────────────────────────────────────────
 
   const vidModel = VIDEO_MODELS.find(m => m.id === modelId);
-  const ratios = (isVideo ? vidModel?.ratios : imgModel?.ratios) ?? [];
+  const talkingCfg = VIDEO_MODELS.find(m => m.id === TALKING_GENERATE_MODEL);
+  const talkingFaceReady = !!(vidStartFrame?.cdnUrl && !vidStartFrame.error);
+  const talkingAudioReady = vidRefAudios.some((r) => r.cdnUrl && !r.error);
+  const talkingRoute = resolveTalkingRoute({ hasFace: talkingFaceReady, hasAudio: talkingAudioReady });
+  const talkingModel = VIDEO_MODELS.find(m => m.id === talkingModelForRoute(talkingRoute));
+  useEffect(() => {
+    if (!talkingMode || talkingRoute === "lip-sync") return;
+    const cfg = VIDEO_MODELS.find(m => m.id === TALKING_GENERATE_MODEL);
+    if (!cfg) return;
+    setDuration(d => (cfg.durations.includes(d) ? d : (cfg.defaultDuration ?? cfg.durations[0])));
+    setAspectRatio(r => (cfg.ratios.includes(r) ? r : (cfg.defaultRatio ?? cfg.ratios[0])));
+  }, [talkingMode, talkingRoute]);
+  const ratios = (isVideo
+    ? (talkingMode ? (talkingRoute === "lip-sync" || talkingFaceReady ? [] : (talkingCfg?.ratios ?? vidModel?.ratios ?? [])) : vidModel?.ratios)
+    : imgModel?.ratios) ?? [];
   const supportsQ = !isVideo && !!imgModel?.supportsQuality;
 
   const qualityOpts: string[] = isAzureProvider
     ? (imgModel!.azureQualityOptions ?? [])
     : (imgModel?.apiInput.qualityOptions ?? ["2k", "4k"]);
   const azureResolutionOpts: string[] = isAzureProvider ? (imgModel?.azureResolutionOptions ?? []) : [];
-  const durations = vidModel?.durations ?? [];
+  const durations = isVideo && talkingMode
+    ? (talkingRoute === "lip-sync" ? [] : (talkingCfg?.durations ?? vidModel?.durations ?? []))
+    : (vidModel?.durations ?? []);
   const vidModes = vidModel?.modes ?? [];
   const activeModel = models.find(m => m.id === modelId);
   const hasRefImgs = refImages.length > 0;
@@ -2622,11 +2714,16 @@ function GalleryInner() {
 
   const vidRequiresPrompt = isVideo && !!(vidModel?.apiInput.promptMaxLength);
   const isAvatarModel = isVideo && !!vidModel?.apiInput.useKlingAiAvatar;
-  const avatarInputsReady = !isAvatarModel || (
+  const talkingReady = !isVideo || !talkingMode || (
+    talkingRoute === "generate" ? prompt.trim().length > 0
+      : talkingRoute === "lip-sync" ? talkingFaceReady && talkingAudioReady
+        : talkingAudioReady
+  );
+  const avatarInputsReady = talkingMode || !isAvatarModel || (
     !!(vidStartFrame?.cdnUrl && !vidStartFrame.error) &&
     vidRefAudios.some((r) => r.cdnUrl && !r.error)
   );
-  const canGenerate = kieKeySet === false ? false : submitting ? false : promptOverLimit ? false : !avatarInputsReady ? false : (vidRequiresPrompt || !isVideo) ? prompt.trim().length > 0 : true;
+  const canGenerate = kieKeySet === false ? false : submitting ? false : promptOverLimit ? false : !talkingReady ? false : !avatarInputsReady ? false : talkingMode ? true : (vidRequiresPrompt || !isVideo) ? prompt.trim().length > 0 : true;
 
   const handleAddReference = useCallback((url: string) => {
     if (refImages.some(r => r.cdnUrl === url || r.objectUrl === url)) {
@@ -2657,20 +2754,20 @@ function GalleryInner() {
     } else if (target === "startFrame") {
       setVidStartFrame(entry);
       if (modelId === "happyhorse") setVidResources([]);
-      if (modelId === "seedance-2" || modelId === "seedance-2-fast") { setVidResources([]); setVidRefVideos([]); setVidRefAudios([]); }
+      if (!talkingMode && isSeedanceTalkingFamily(modelId)) { setVidResources([]); setVidRefVideos([]); setVidRefAudios([]); }
     } else if (target === "endFrame") {
       setVidEndFrame(entry);
-      if (modelId === "seedance-2" || modelId === "seedance-2-fast") { setVidResources([]); setVidRefVideos([]); setVidRefAudios([]); }
+      if (!talkingMode && isSeedanceTalkingFamily(modelId)) { setVidResources([]); setVidRefVideos([]); setVidRefAudios([]); }
     } else if (target === "videoRef") {
       setVidVideoRef(entry);
     } else if (target === "resource") {
-      if (modelId === "seedance-2" || modelId === "seedance-2-fast") { setVidStartFrame(null); setVidEndFrame(null); }
+      if (!talkingMode && isSeedanceTalkingFamily(modelId)) { setVidStartFrame(null); setVidEndFrame(null); }
       setVidResources(prev => [...prev, entry]);
     } else if (target === "referenceVideo") {
-      if (modelId === "seedance-2" || modelId === "seedance-2-fast") { setVidStartFrame(null); setVidEndFrame(null); }
+      if (!talkingMode && isSeedanceTalkingFamily(modelId)) { setVidStartFrame(null); setVidEndFrame(null); }
       setVidRefVideos(prev => [...prev, entry]);
     }
-  }, [handleAddReference, modelId]);
+  }, [handleAddReference, modelId, talkingMode]);
 
   const handleReorderDrop = (targetId: string, listTarget: "refImage" | "resource" | "referenceVideo" | "audioRef") => {
     const dragId = _reorderDragItem?.id;
@@ -3870,7 +3967,7 @@ function GalleryInner() {
                 )}
               </div>
             )}
-            {isVideo && vidRefHandles.length > 0 && (() => {
+            {isVideo && (talkingMode || vidRefHandles.length > 0) && (() => {
               type VidSlot =
                 | { kind: "filled"; target: "startFrame"|"endFrame"|"resource"|"videoRef"|"referenceVideo"|"audioRef"; mediaKind: "image"|"video"|"audio"; label: string; ref: RefImage }
                 | { kind: "add";    target: "startFrame"|"endFrame"|"resource"|"videoRef"|"referenceVideo"|"audioRef"; mediaKind: "image"|"video"|"audio"; label: string; countLeft: number }
@@ -3881,6 +3978,13 @@ function GalleryInner() {
               const isHappyHorse = vidModel?.id === "happyhorse";
               const isVeo = modelId === "veo3" || modelId === "veo3_fast" || modelId === "veo3_lite";
               const isAvatar = !!vidModel?.apiInput.useKlingAiAvatar;
+              if (talkingMode) {
+                if (vidStartFrame) slots.push({ kind: "filled", target: "startFrame", mediaKind: "image", label: "Face", ref: vidStartFrame });
+                else slots.push({ kind: "add", target: "startFrame", mediaKind: "image", label: "Face", countLeft: 1 });
+                displayVidRefAudios.forEach(r => slots.push({ kind: "filled", target: "audioRef", mediaKind: "audio", label: "Audio", ref: r }));
+                if (vidRefAudios.length < 1)
+                  slots.push({ kind: "add", target: "audioRef", mediaKind: "audio", label: "Audio", countLeft: 1 });
+              } else {
               for (const h of vidRefHandles) {
                 if (isVeo) {
                   if (veoMode === "references" && (h === "startFrame" || h === "endFrame")) continue;
@@ -3927,9 +4031,19 @@ function GalleryInner() {
                     slots.push({ kind: "add", target: h, mediaKind: "audio", label: "Audio", countLeft: maxRefAud - vidRefAudios.length });
                 }
               }
+              }
               return (
                 <div style={{ padding: "14px 16px 14px", display: "flex", flexDirection: "column", gap: "10px" }} onPointerUp={() => { if (_reorderDragItem) { _reorderDragItem = null; _reorderOverId = null; setDraggingId(null); setReorderOverId(null); } }}>
-                  {isAvatar && (
+                  {talkingMode ? (
+                    <p style={{ margin: 0, fontSize: "12px", color: "rgba(255,255,255,0.45)", lineHeight: 1.4 }}>
+                      {talkingRoute === "lip-sync"
+                        ? "Lip-sync: voice comes from your audio. Face + audio required."
+                        : talkingRoute === "audio-only"
+                          ? "Audio only: the model invents a speaker for this track. Voice comes from your audio."
+                          : "Add an optional face, pick Woman / Man / Boy, and describe the topic. No audio upload."}
+                      {" "}{talkingPipelineHelper()}
+                    </p>
+                  ) : isAvatar && (
                     <p style={{ margin: 0, fontSize: "12px", color: "rgba(255,255,255,0.45)", lineHeight: 1.4 }}>
                       Upload one face image and one audio file (MP3 recommended, under 4 MB).
                     </p>
@@ -3991,7 +4105,7 @@ function GalleryInner() {
           {/* ── Prompt input ── */}
           {/* ── Input + Controls + Generate ── */}
           <div style={{
-            padding: `${(isVideo && vidRefHandles.length > 0) || (!isVideo && !!imgModel?.supportsImages) ? 0 : 16}px 14px 14px 16px`,
+            padding: `${(isVideo && (talkingMode || vidRefHandles.length > 0)) || (!isVideo && !!imgModel?.supportsImages) ? 0 : 16}px 14px 14px 16px`,
             display: "flex",
             flexDirection: "column",
             gap: "10px",
@@ -4142,7 +4256,7 @@ function GalleryInner() {
                     pointerEvents: "none",
                   }}
                 >
-                  {isVideo ? "Describe the video you imagine…" : "Describe the scene you imagine…"}
+                  {isVideo && talkingMode ? "What should they talk about?" : isVideo ? "Describe the video you imagine…" : "Describe the scene you imagine…"}
                 </div>
               )}
             </div>
@@ -4204,7 +4318,7 @@ function GalleryInner() {
                           value={block}
                           rows={1}
                           data-prompt-input=""
-                          placeholder={blockIdx === 0 && !isNonEmpty ? "Describe the scene you imagine…" : undefined}
+                          placeholder={blockIdx === 0 && !isNonEmpty ? (isVideo && talkingMode ? "What should they talk about?" : "Describe the scene you imagine…") : undefined}
                           onClick={e => { if (isExpanded) e.stopPropagation(); }}
                           onFocus={e => {
                             activeBlockRef.current = e.currentTarget;
@@ -4425,7 +4539,21 @@ function GalleryInner() {
             <div style={{ display: "flex", alignItems: "center", gap: "12px", borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "12px", marginTop: promptExpanded ? "auto" : "4px" }}>
               {/* Controls group */}
               <div style={{ flex: 1, display: "flex", alignItems: "center", gap: "7px", flexWrap: "wrap" }}>
-                {/* Model picker */}
+                {/* Model picker — Talking shows the auto-routed model instead of the full list */}
+                {isVideo && talkingMode ? (
+                <CustomDropdown
+                  value={talkingModelForRoute(talkingRoute)}
+                  onChange={() => {}}
+                  disabled
+                  showChevron={false}
+                  options={talkingModel ? [{
+                    value: talkingModel.id,
+                    label: talkingModel.name,
+                    group: talkingModel.provider,
+                    providerIcon: <ProviderIcon provider={talkingModel.provider} />,
+                  }] : [{ value: talkingModelForRoute(talkingRoute), label: talkingModelForRoute(talkingRoute) }]}
+                />
+                ) : (
                 <CustomDropdown
                   value={modelId}
                   onChange={setModelId}
@@ -4438,9 +4566,10 @@ function GalleryInner() {
                   }))}
                   showChevron
                 />
+                )}
 
                 {/* Backend picker — only for models with more than one backend to choose from */}
-                {modelHasProviderChoice(modelId) && (
+                {!(isVideo && talkingMode) && modelHasProviderChoice(modelId) && (
                   <CustomDropdown
                     value={providerId}
                     onChange={(v) => setModelProvider(modelId, v as (typeof PROVIDERS)[number]["id"])}
@@ -4544,7 +4673,7 @@ function GalleryInner() {
                 )}
 
                 {/* Mode (video) */}
-                {isVideo && vidModes.length > 0 && (
+                {isVideo && !talkingMode && vidModes.length > 0 && (
                   <CustomDropdown
                     value={mode}
                     onChange={setMode}
@@ -4554,7 +4683,7 @@ function GalleryInner() {
                 )}
 
                 {/* Resolution (video) */}
-                {isVideo && (vidModel?.resolutions?.length ?? 0) > 0 && (
+                {isVideo && !talkingMode && (vidModel?.resolutions?.length ?? 0) > 0 && (
                   <CustomDropdown
                     value={resolution || vidModel!.defaultResolution!}
                     onChange={setResolution}
@@ -4563,8 +4692,63 @@ function GalleryInner() {
                   />
                 )}
 
+                {/* Talking video */}
+                {isVideo && (
+                  <button
+                    onClick={() => {
+                      setTalkingMode(on => {
+                        if (!on) setSound(true);
+                        return !on;
+                      });
+                    }}
+                    disabled={submitting}
+                    style={{
+                      display: "flex", alignItems: "center", gap: "7px",
+                      height: "36px", padding: "0 12px",
+                      borderRadius: "8px",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      background: talkingMode ? "rgba(94,234,212,0.12)" : "rgba(255,255,255,0.05)",
+                      color: talkingMode ? "#5EEAD4" : "rgba(255,255,255,0.55)",
+                      fontSize: "13px", fontFamily: "inherit",
+                      cursor: submitting ? "not-allowed" : "pointer",
+                      transition: "background 150ms, color 150ms, border-color 150ms",
+                      flexShrink: 0,
+                    }}>
+                    <span style={{
+                      width: "28px", height: "16px", borderRadius: "8px",
+                      background: talkingMode ? "#5EEAD4" : "rgba(255,255,255,0.18)",
+                      position: "relative", flexShrink: 0,
+                      transition: "background 150ms",
+                    }}>
+                      <span style={{
+                        position: "absolute", top: "2px",
+                        left: talkingMode ? "14px" : "2px",
+                        width: "12px", height: "12px", borderRadius: "50%",
+                        background: talkingMode ? "#1e1040" : "#ffffff",
+                        transition: "left 150ms",
+                      }} />
+                    </span>
+                    Talking
+                  </button>
+                )}
+
+                {isVideo && talkingMode && talkingRoute === "generate" && (
+                  <CustomDropdown
+                    value={talkingVoice}
+                    onChange={(v) => setTalkingVoice(parseTalkingVoice(v))}
+                    disabled={submitting}
+                    options={TALKING_VOICES.map(v => ({ value: v.id, label: v.label }))}
+                  />
+                )}
+
+                {isVideo && talkingMode && (
+                  <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)", whiteSpace: "nowrap", flexShrink: 0 }}>
+                    {talkingRouteLabel(talkingRoute)} · {talkingVoiceStatus(talkingRoute, talkingVoice)}
+                  </span>
+                )}
+
                 {/* Sound toggle (video) */}
-                {isVideo && vidModel?.sound && (
+                {isVideo && !talkingMode && vidModel?.sound && (
                   <button
                     onClick={() => setSound(s => !s)}
                     disabled={submitting}

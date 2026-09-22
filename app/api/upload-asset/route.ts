@@ -25,7 +25,8 @@ export const maxDuration = 60;
 const ALLOWED_MIMES = new Set([
   "image/png", "image/jpeg", "image/webp", "image/gif",
   "video/mp4", "video/webm", "video/quicktime",
-  "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/m4a",
+  "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/mp4",
+  "audio/m4a", "audio/x-m4a", "audio/aac", "audio/ogg",
 ]);
 
 /** Align with Vercel ~4.5 MB request body limit. */

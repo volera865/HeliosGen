@@ -4,6 +4,7 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import { GUEST_MODE, GUEST_USER_ID } from "@/lib/guestMode";
 import * as guestDb from "@/lib/guest/db";
 import { createClient } from "@/lib/supabase/server";
+import { syncPendingKieJob } from "@/lib/kieJobSync";
 
 async function getAuthedUserId(req: NextRequest): Promise<string | null> {
   if (GUEST_MODE) return GUEST_USER_ID;
@@ -48,7 +49,7 @@ async function recoverJob(
 
   const { data: gen } = await supabaseAdmin
     .from("generations")
-    .select("status, video_url, image_url, image_urls, error_msg, user_id")
+    .select("status, video_url, image_url, image_urls, error_msg, user_id, generation_type")
     .eq("task_id", taskId)
     .single();
 
@@ -88,6 +89,19 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(result ?? { status: "not_found" });
   }
 
+  // Hidden talking pipeline — parent id is not a Kie taskId; do not poll recordInfo on it.
+  if (taskId.startsWith("talk-")) {
+    const recovered = await recoverJob(taskId, userId);
+    if (recovered === "forbidden" || recovered === "not_found") {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    if (recovered === "done" || recovered === "error") {
+      return NextResponse.json(jobStore.get(taskId)!);
+    }
+    const result = jobStore.get(taskId);
+    return NextResponse.json(result ?? { status: "pending", phase: "creating-voice" });
+  }
+
   const recovered = await recoverJob(taskId, userId);
   if (recovered === "forbidden" || recovered === "not_found") {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -103,5 +117,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(result);
   }
 
-  return NextResponse.json({ status: "pending" });
+  const synced = await syncPendingKieJob(taskId, userId);
+  if (synced && synced.status !== "pending") {
+    return NextResponse.json(synced);
+  }
+
+  return NextResponse.json(synced ?? { status: "pending", phase: "queued" });
 }

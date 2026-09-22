@@ -20,6 +20,7 @@ import { IMAGE_MODELS, AZURE_POPULAR_SIZES, validateAzureCustomSize } from "@/li
 import { PROVIDERS, ProviderId, getModelProvider, setModelProvider, modelHasProviderChoice } from "@/lib/providers";
 import { useGeneratingBorderAnimation } from "@/lib/useGeneratingBorderAnimation";
 import MissingInputWarning from "./MissingInputWarning";
+import { phaseLabel, phaseProgress, formatElapsed } from "@/lib/genProgress";
 
 // Derived from config — no hardcoding needed
 const MODELS = IMAGE_MODELS.map((m) => ({ id: m.id, name: m.name, meta: m.provider }));
@@ -426,6 +427,14 @@ export default function GenerateNode({ id, data, selected }: NodeProps<GenerateN
   const animBusy = loading || status === "running";
   const busy = animBusy || isPending;
   const isQueued = !busy && !!data.pipelineQueued;
+  const progressPhase = data.progressPhase as string | undefined;
+  const [elapsedSec, setElapsedSec] = useState(0);
+  useEffect(() => {
+    if (status !== "running") { setElapsedSec(0); return; }
+    const t0 = Date.now();
+    const t = setInterval(() => setElapsedSec(Math.floor((Date.now() - t0) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [status, data.taskId]);
   useGeneratingBorderAnimation(cardRef, animBusy);
 
   const [natW, natH] = (() => {
@@ -504,9 +513,9 @@ export default function GenerateNode({ id, data, selected }: NodeProps<GenerateN
     if (!taskId || status !== "running") return;
 
     let cancelled = false;
-    // Same 10-minute ceiling the gallery poller uses — a job that never
+    // Same 15-minute ceiling the gallery poller uses — a job that never
     // settles must not leave the node spinning forever.
-    const deadline = Date.now() + 10 * 60 * 1000;
+    const deadline = Date.now() + 15 * 60 * 1000;
 
     const doPoll = async () => {
       try {
@@ -519,7 +528,7 @@ export default function GenerateNode({ id, data, selected }: NodeProps<GenerateN
           const gens = [...((storeNode?.data?.generations as GenEntry[] | undefined) ?? [])] as GenEntry[];
           const slot = storeNode?.data?.currentGenIdx as number ?? gens.length - 1;
           gens[slot] = json.imageUrl as string;
-          updateNodeData(id, { status: "done", imageUrl: json.imageUrl, taskId: undefined, generations: gens, currentGenIdx: slot });
+          updateNodeData(id, { status: "done", imageUrl: json.imageUrl, taskId: undefined, progressPhase: undefined, generations: gens, currentGenIdx: slot });
           clearInterval(interval);
           document.removeEventListener("visibilitychange", onVisible);
           browserNotify("Node complete", (data.label as string | undefined) ?? "Image generated");
@@ -528,7 +537,7 @@ export default function GenerateNode({ id, data, selected }: NodeProps<GenerateN
           const gens = [...((storeNode?.data?.generations as GenEntry[] | undefined) ?? [])] as GenEntry[];
           const slot = storeNode?.data?.currentGenIdx as number ?? gens.length - 1;
           gens[slot] = { error: json.error ?? "Generation failed" };
-          updateNodeData(id, { status: "error", errorMsg: json.error, taskId: undefined, generations: gens, currentGenIdx: slot });
+          updateNodeData(id, { status: "error", errorMsg: json.error, taskId: undefined, progressPhase: undefined, generations: gens, currentGenIdx: slot });
           clearInterval(interval);
           document.removeEventListener("visibilitychange", onVisible);
           browserNotify("Node failed", json.error ?? "Generation failed");
@@ -537,27 +546,32 @@ export default function GenerateNode({ id, data, selected }: NodeProps<GenerateN
           const gens = [...((storeNode?.data?.generations as GenEntry[] | undefined) ?? [])] as GenEntry[];
           const slot = storeNode?.data?.currentGenIdx as number ?? gens.length - 1;
           gens[slot] = { error: "Job expired or unknown" };
-          updateNodeData(id, { status: "error", errorMsg: "Job expired or unknown", taskId: undefined, generations: gens, currentGenIdx: slot });
+          updateNodeData(id, { status: "error", errorMsg: "Job expired or unknown", taskId: undefined, progressPhase: undefined, generations: gens, currentGenIdx: slot });
           clearInterval(interval);
           document.removeEventListener("visibilitychange", onVisible);
           browserNotify("Node failed", "Job expired or unknown");
-        } else if (Date.now() > deadline) {
+        } else if (json.status === "pending") {
+          if (json.phase) {
+            const current = useWorkflowStore.getState().nodes.find(n => n.id === id)?.data?.progressPhase;
+            if (json.phase !== current) updateNodeData(id, { progressPhase: json.phase });
+          }
+        }
+        if (json.status !== "done" && json.status !== "error" && json.status !== "not_found" && Date.now() > deadline) {
           const storeNode = useWorkflowStore.getState().nodes.find(n => n.id === id);
           const gens = [...((storeNode?.data?.generations as GenEntry[] | undefined) ?? [])] as GenEntry[];
           const slot = storeNode?.data?.currentGenIdx as number ?? gens.length - 1;
           gens[slot] = { error: "Timed out" };
-          updateNodeData(id, { status: "error", errorMsg: "Timed out", taskId: undefined, generations: gens, currentGenIdx: slot });
+          updateNodeData(id, { status: "error", errorMsg: "Timed out", taskId: undefined, progressPhase: undefined, generations: gens, currentGenIdx: slot });
           clearInterval(interval);
           document.removeEventListener("visibilitychange", onVisible);
           browserNotify("Node failed", "Timed out");
         }
-        // "pending" → keep polling
       } catch {
         // network hiccup — keep polling
       }
     };
 
-    const interval = setInterval(doPoll, 3000);
+    const interval = setInterval(doPoll, 2000);
 
     // When tab becomes visible again, poll immediately instead of waiting for the throttled interval
     const onVisible = () => { if (!document.hidden) doPoll(); };
@@ -954,7 +968,8 @@ export default function GenerateNode({ id, data, selected }: NodeProps<GenerateN
                   </svg>
                 )}
                 <span className="text-[11px] font-medium" style={{ color: isPending ? "#888" : "#2DD4BF" }}>
-                  {isPending ? "Pending" : "Generating…"}
+                  {phaseLabel(progressPhase, isPending)}
+                  {!isPending && elapsedSec > 0 ? ` · ${formatElapsed(elapsedSec)}` : ""}
                 </span>
               </div>
               {isPending && (
@@ -971,6 +986,20 @@ export default function GenerateNode({ id, data, selected }: NodeProps<GenerateN
                   <span className="text-[11px] text-[#ccc] font-medium">Cancel</span>
                 </button>
               )}
+            </div>
+          )}
+          {busy && generations[currentGenIdx] === null && (
+            <div className="absolute left-2 right-2 bottom-2 z-20 pointer-events-none">
+              <div className="h-[3px] rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.12)" }}>
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: `${phaseProgress(progressPhase, elapsedSec, isPending)}%`,
+                    background: isPending ? "rgba(255,255,255,0.35)" : "#2DD4BF",
+                    transition: "width 500ms ease",
+                  }}
+                />
+              </div>
             </div>
           )}
           {generations.length > 0 ? (

@@ -14,6 +14,7 @@ if (typeof window !== "undefined" && process.env.NEXT_PUBLIC_GUEST_MODE !== "tru
 }
 import { edgeStyle } from "./edgeStyles";
 import { VIDEO_MODELS } from "./modelConfig";
+import type { TalkingVoice } from "./talkingPrompt";
 import {
   Node,
   Edge,
@@ -61,7 +62,7 @@ export interface NodeData extends Record<string, unknown> {
   // grok imagine settings
 
   grokMode?: string;
-  grokResolution?: string;
+  talkingVoice?: TalkingVoice;
   // seed (for models that support it)
   seed?: number;
   // error
@@ -71,6 +72,7 @@ export interface NodeData extends Record<string, unknown> {
   locked?: boolean;
   // pending job
   taskId?: string;
+  progressPhase?: string;
 }
 
 /** Pick only the listed keys from an object; returns null if none are present. */

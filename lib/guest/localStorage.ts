@@ -5,6 +5,9 @@ import https from "node:https";
 import http  from "node:http";
 import { lookupAssetHash, storeAssetHash } from "./db";
 import { stripMetadata } from "../mediaMetadata";
+import { resolvePublicAssetOrigin } from "../kieCallback";
+import { toKieFetchableUrl } from "../kieFileUpload";
+import { extFromContentType, urlMatchesContentType } from "../mediaType";
 
 const GENERATED_DIR = join(process.cwd(), "public", "generated");
 
@@ -12,23 +15,14 @@ function hashBuffer(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
 
-function ext(contentType: string): string {
-  if (contentType.includes("mp4"))  return "mp4";
-  if (contentType.includes("webm")) return "webm";
-  if (contentType.includes("png"))  return "png";
-  if (contentType.includes("gif"))  return "gif";
-  if (contentType.includes("webp")) return "webp";
-  return "jpg";
-}
-
 export async function uploadBuffer(buffer: Buffer, contentType: string, folder: string): Promise<string> {
   buffer = await stripMetadata(buffer, contentType);
   const hash   = hashBuffer(buffer);
   const cached = lookupAssetHash(hash);
-  if (cached) return cached;
+  if (cached && urlMatchesContentType(cached, contentType)) return cached;
 
   await mkdir(join(GENERATED_DIR, folder), { recursive: true });
-  const filename = `${randomUUID()}.${ext(contentType)}`;
+  const filename = `${randomUUID()}.${extFromContentType(contentType)}`;
   await writeFile(join(GENERATED_DIR, folder, filename), buffer);
   const url = `/generated/${folder}/${filename}`;
 
@@ -68,22 +62,21 @@ export async function uploadDataUrl(dataUrl: string, folder: string): Promise<st
 }
 
 /** Kie.ai fetches this over the internet, so a bare "/generated/..." path
- *  won't resolve — prefix with the public tunnel URL (e.g. ngrok) when set.
- *  Only used for outbound reference URLs, never for stored results (those
- *  must stay same-origin so the browser doesn't have to cross the tunnel). */
-function toPublicUrl(path: string, base = process.env.CALLBACK_BASE_URL?.replace(/\/$/, "")): string {
-  return base && path.startsWith("/") ? `${base}${path}` : path;
-}
-
+ *  won't resolve. Prefer a live public origin; otherwise upload to Kie's
+ *  file API. Never prefix a dead tunnel (loca.lt / placeholder). */
 export async function ensureStorage(url: string, folder: string): Promise<string> {
-  const base = process.env.CALLBACK_BASE_URL?.replace(/\/$/, "");
-  if (base && url.startsWith(`${base}/generated/`)) return url; // already public
+  const origin = resolvePublicAssetOrigin();
+  if (origin && url.startsWith(`${origin}/generated/`)) return url;
+  if (url.startsWith("https://") && !url.includes(".loca.lt/") && url.indexOf("/generated/") === -1) {
+    return url;
+  }
 
   const stored = url.startsWith("data:")
     ? await uploadDataUrl(url, folder)
-    : url.startsWith("/generated/")
-    ? url
+    : url.includes("/generated/")
+    ? (url.slice(url.indexOf("/generated/")))
     : await mirrorToStorage(url, folder);
 
-  return toPublicUrl(stored, base);
+  if (origin) return `${origin}${stored}`;
+  return toKieFetchableUrl(stored);
 }
