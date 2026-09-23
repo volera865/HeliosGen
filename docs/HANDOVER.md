@@ -54,19 +54,22 @@ Run both in the Supabase SQL editor against the project used by the Vercel env v
 
 ### Site URL & redirects
 
-- **Site URL**: your Vercel production origin (no trailing path).
+- **Site URL**: your Vercel **Production** origin (no trailing path).  
+  Example for this deployment: `https://higgsfield-n7pq.vercel.app`  
+  Do **not** use a `*-git-main-*` preview URL — those are behind Vercel SSO (“Authentication Required”) and invitees cannot open them.
 - **Redirect URLs**: include  
   `{SiteURL}/api/auth/callback`  
-  and the same for any preview origins you use.
+  Example: `https://higgsfield-n7pq.vercel.app/api/auth/callback`  
+  Optionally keep preview callbacks for internal testing only.
 
 ### Disable public sign-ups
 
-- Authentication → Providers → Email: **disable** “Enable sign ups” (or equivalent).
+- Authentication → Providers → Email (or Sign In / Providers): **disable** “Allow new users to sign up”.
 - Access is invite-only; the UI no longer offers a sign-up tab.
 
 ### Email templates
 
-Use **token_hash** links that hit the app callback (not the default Supabase hash-only URL).
+Use **token_hash** links that hit the app callback (not the default Supabase `{{ .ConfirmationURL }}` alone).
 
 **Invite user** — Confirmation URL / link body should use:
 
@@ -94,13 +97,27 @@ Example reset email body:
 <p><a href="{{ .SiteURL }}/api/auth/callback?token_hash={{ .TokenHash }}&type=recovery">Reset password</a></p>
 ```
 
-After verify, the callback redirects with `#type=recovery` so `components/AuthEvents.tsx` opens the set-password modal. Invite uses the same hash so the password screen opens.
+After verify, the callback redirects with `#type=recovery` so `components/AuthEvents.tsx` opens the set-password modal. Hash `#type=invite` is also handled (default Supabase invite fragments).
+
+### Vercel (invite landing)
+
+- Production domain must be **public** (no Deployment Protection SSO for strangers).
+- Set `CALLBACK_BASE_URL=https://higgsfield-n7pq.vercel.app` (or your custom production domain) and redeploy.
+- Never set Supabase Site URL to a protected Preview deployment URL.
 
 ### Other dashboard checks
 
 - Confirm Email provider is enabled for invites / recovery.
 - OTP / link expiry long enough for invitees to accept.
 - No need to expose the service role key in the browser.
+
+### Invite re-test checklist
+
+1. Site URL = Production (`https://higgsfield-n7pq.vercel.app`).
+2. Invite template uses `token_hash` + `type=invite` as above.
+3. Re-invite the user (or delete and invite again).
+4. Open the email link in **incognito** (not logged into Vercel).
+5. Expect: land on Production → **Set password** modal → then sign in. No Vercel “Authentication Required” page.
 
 ## 4. Adding a new video model (`lib/modelConfig.ts`)
 

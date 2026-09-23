@@ -22,9 +22,11 @@ export default function AuthEvents() {
     // Handle Supabase auth hash params on page load.
     const hash   = window.location.hash.slice(1);
     const params = new URLSearchParams(hash);
+    const hashType = params.get("type");
 
-    if (params.get("type") === "recovery") {
-      // Valid recovery link — establish session then open the reset modal.
+    // Invite and recovery both mean "set / replace password".
+    // Default Supabase invite links use #type=invite; our callback rewrites to #type=recovery.
+    if (hashType === "recovery" || hashType === "invite") {
       const access_token  = params.get("access_token");
       const refresh_token = params.get("refresh_token");
       window.history.replaceState(null, "", window.location.pathname + window.location.search);

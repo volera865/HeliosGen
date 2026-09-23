@@ -52,7 +52,7 @@ export default function ResetPasswordModal() {
       <div className="w-80 rounded-xl border border-[#1A2030] bg-[#0B0E14] shadow-2xl p-6 flex flex-col gap-4">
         {/* Header */}
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-white tracking-tight">Reset password</h2>
+          <h2 className="text-sm font-semibold text-white tracking-tight">Set password</h2>
           <button
             onClick={() => setOpen(false)}
             className="text-[#A0A0A0] hover:text-white transition-colors"

@@ -21,8 +21,9 @@ export default function AuthButton() {
     const hash   = window.location.hash.slice(1);
     const params = new URLSearchParams(hash);
 
-    if (params.get("type") === "recovery") {
-      // Valid recovery link — establish session then open the reset modal.
+    const hashType = params.get("type");
+    // Invite and recovery both mean "set / replace password".
+    if (hashType === "recovery" || hashType === "invite") {
       const access_token  = params.get("access_token");
       const refresh_token = params.get("refresh_token");
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
