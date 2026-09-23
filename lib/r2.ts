@@ -1,4 +1,5 @@
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "crypto";
 import https from "node:https";
 import http  from "node:http";
@@ -26,6 +27,41 @@ function getS3(): S3Client {
 
 function cdnUrl(key: string): string {
   return `${process.env.R2_PUBLIC_URL!.replace(/\/$/, "")}/${key}`;
+}
+
+/** Folder used for direct / proxied user uploads (matches upload-asset). */
+export function folderForUploadMime(contentType: string): string {
+  const t = contentType.toLowerCase().split(";")[0].trim();
+  return t.startsWith("video/") || t.startsWith("audio/") ? "references" : "uploads";
+}
+
+export type PresignPutResult = {
+  key: string;
+  uploadUrl: string;
+  cdnUrl: string;
+  headers: { "Content-Type": string };
+};
+
+/** Short-lived PUT URL so the browser can upload straight to R2 (bypasses Vercel 4.5 MB). */
+export async function presignPutObject(opts: {
+  contentType: string;
+  folder?: string;
+}): Promise<PresignPutResult> {
+  const contentType = opts.contentType.toLowerCase().split(";")[0].trim();
+  const folder = opts.folder ?? folderForUploadMime(contentType);
+  const key = `${folder}/${randomUUID()}.${extFromContentType(contentType)}`;
+  const command = new PutObjectCommand({
+    Bucket: process.env.R2_BUCKET_NAME!,
+    Key: key,
+    ContentType: contentType,
+  });
+  const uploadUrl = await getSignedUrl(getS3(), command, { expiresIn: 600 });
+  return {
+    key,
+    uploadUrl,
+    cdnUrl: cdnUrl(key),
+    headers: { "Content-Type": contentType },
+  };
 }
 
 /** Upload a Buffer to R2 (or local disk in guest mode) and return the public URL. */

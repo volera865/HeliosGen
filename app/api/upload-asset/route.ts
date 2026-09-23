@@ -19,18 +19,12 @@ import { uploadBuffer } from "@/lib/r2";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { GUEST_MODE, resolveUserId } from "@/lib/guestMode";
 import * as guestDb from "@/lib/guest/db";
+import {
+  PROXY_UPLOAD_MAX_BYTES,
+  UPLOAD_ALLOWED_MIMES,
+} from "@/lib/uploadLimits";
 
 export const maxDuration = 60;
-
-const ALLOWED_MIMES = new Set([
-  "image/png", "image/jpeg", "image/webp", "image/gif",
-  "video/mp4", "video/webm", "video/quicktime",
-  "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/mp4",
-  "audio/m4a", "audio/x-m4a", "audio/aac", "audio/ogg",
-]);
-
-/** Align with Vercel ~4.5 MB request body limit. */
-const MAX_BYTES = 4 * 1024 * 1024;
 
 export async function POST(req: NextRequest) {
   try {
@@ -42,19 +36,19 @@ export async function POST(req: NextRequest) {
     const mimeType = (req.headers.get("content-type") ?? "application/octet-stream")
       .split(";")[0].trim().toLowerCase();
 
-    if (!ALLOWED_MIMES.has(mimeType)) {
+    if (!UPLOAD_ALLOWED_MIMES.has(mimeType)) {
       return NextResponse.json({ error: `Unsupported media type: ${mimeType}` }, { status: 415 });
     }
 
     const contentLength = Number(req.headers.get("content-length") ?? 0);
-    if (contentLength > MAX_BYTES) {
+    if (contentLength > PROXY_UPLOAD_MAX_BYTES) {
       return NextResponse.json({ error: "File exceeds 4 MB limit" }, { status: 413 });
     }
 
     const bytes  = await req.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
-    if (buffer.byteLength > MAX_BYTES) {
+    if (buffer.byteLength > PROXY_UPLOAD_MAX_BYTES) {
       return NextResponse.json({ error: "File exceeds 4 MB limit" }, { status: 413 });
     }
 

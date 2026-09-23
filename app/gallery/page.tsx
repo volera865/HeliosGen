@@ -9,6 +9,7 @@ import { useWorkflowStore } from "@/lib/store";
 import type { User } from "@supabase/supabase-js";
 import { Maximize2, Minimize2, ShieldAlert, X } from "lucide-react";
 import { GalleryItem, getToken, galleryCache } from "@/lib/galleryUtils";
+import { uploadAssetFile } from "@/lib/uploadAssetClient";
 import { useFolderStore } from "@/lib/folderStore";
 import { MediaPickerModal } from "@/components/MediaPickerModal";
 import { useSidebar } from "@/components/ui/sidebar";
@@ -1842,17 +1843,8 @@ function GalleryInner() {
     await Promise.all(toAdd.map(async (file, i) => {
       const entry = newEntries[i];
       try {
-        const res = await fetch("/api/upload-asset", {
-          method: "POST",
-          headers: {
-            "Content-Type": file.type,
-            Authorization: `Bearer ${token}`,
-          },
-          body: file,
-        });
-        const data = await res.json() as { cdnUrl?: string; error?: string };
-        if (!res.ok || !data.cdnUrl) throw new Error(data.error ?? "Upload failed");
-        setRefImages(prev => prev.map(r => r.id === entry.id ? { ...r, cdnUrl: data.cdnUrl!, uploading: false } : r));
+        const cdnUrl = await uploadAssetFile(file, token);
+        setRefImages(prev => prev.map(r => r.id === entry.id ? { ...r, cdnUrl, uploading: false } : r));
       } catch {
         setRefImages(prev => prev.map(r => r.id === entry.id ? { ...r, uploading: false, error: true } : r));
       }
@@ -1944,18 +1936,12 @@ function GalleryInner() {
     await Promise.all(toAdd.map(async (file, i) => {
       const entry = newEntries[i];
       try {
-        const res = await fetch("/api/upload-asset", {
-          method: "POST",
-          headers: { "Content-Type": file.type, Authorization: `Bearer ${token}` },
-          body: file,
-        });
-        const data = await res.json() as { cdnUrl?: string; error?: string };
-        if (!res.ok || !data.cdnUrl) throw new Error(data.error ?? "Upload failed");
-        const ok = (r: RefImage) => r.id === entry.id ? { ...r, cdnUrl: data.cdnUrl!, uploading: false } : r;
+        const cdnUrl = await uploadAssetFile(file, token);
+        const ok = (r: RefImage) => r.id === entry.id ? { ...r, cdnUrl, uploading: false } : r;
         if (isSingle) {
-          if (target === "startFrame") setVidStartFrame(p => p?.id === entry.id ? { ...p, cdnUrl: data.cdnUrl!, uploading: false } : p);
-          else if (target === "endFrame") setVidEndFrame(p => p?.id === entry.id ? { ...p, cdnUrl: data.cdnUrl!, uploading: false } : p);
-          else setVidVideoRef(p => p?.id === entry.id ? { ...p, cdnUrl: data.cdnUrl!, uploading: false } : p);
+          if (target === "startFrame") setVidStartFrame(p => p?.id === entry.id ? { ...p, cdnUrl, uploading: false } : p);
+          else if (target === "endFrame") setVidEndFrame(p => p?.id === entry.id ? { ...p, cdnUrl, uploading: false } : p);
+          else setVidVideoRef(p => p?.id === entry.id ? { ...p, cdnUrl, uploading: false } : p);
         } else {
           if (target === "resource")       setVidResources(prev => prev.map(ok));
           else if (target === "referenceVideo") setVidRefVideos(prev => prev.map(ok));
@@ -4045,7 +4031,7 @@ function GalleryInner() {
                     </p>
                   ) : isAvatar && (
                     <p style={{ margin: 0, fontSize: "12px", color: "rgba(255,255,255,0.45)", lineHeight: 1.4 }}>
-                      Upload one face image and one audio file (MP3 recommended, under 4 MB).
+                      Upload one face image and one audio file (MP3 recommended, under 100 MB).
                     </p>
                   )}
                   <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "flex-start" }}>
@@ -5414,14 +5400,8 @@ function ElementPickerModal({
     await Promise.all(toAdd.map(async (file, i) => {
       const entry = newEntries[i];
       try {
-        const res = await fetch("/api/upload-asset", {
-          method: "POST",
-          headers: { "Content-Type": file.type, Authorization: `Bearer ${token}` },
-          body: file,
-        });
-        const data = await res.json() as { cdnUrl?: string; error?: string };
-        if (!res.ok || !data.cdnUrl) throw new Error(data.error ?? "Upload failed");
-        setCreateImages(prev => prev.map(e => e.id === entry.id ? { ...e, cdnUrl: data.cdnUrl!, uploading: false } : e));
+        const cdnUrl = await uploadAssetFile(file, token);
+        setCreateImages(prev => prev.map(e => e.id === entry.id ? { ...e, cdnUrl, uploading: false } : e));
       } catch {
         setCreateImages(prev => prev.map(e => e.id === entry.id ? { ...e, uploading: false, error: true } : e));
       }

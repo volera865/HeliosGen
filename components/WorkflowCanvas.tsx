@@ -24,7 +24,7 @@ import { topoSort, resolveInputs } from "@/lib/executor";
 import { NODE_SIZE, FALLBACK_SIZE, getLastNodeSettings, getDefaultNodeSize } from "@/lib/nodeTypes";
 import { edgeStyle } from "@/lib/edgeStyles";
 import { createClient } from "@/lib/supabase/client";
-import { sha256Hex } from "@/lib/assetHash";
+import { uploadAssetFile } from "@/lib/uploadAssetClient";
 
 import { motion } from "motion/react";
 import TypewriterHeading from "@/components/ui/TypewriterHeading";
@@ -542,29 +542,14 @@ export default function WorkflowCanvas() {
             });
           img.src = blobUrl;
 
-          // Hash + lookup + upload in background
+          // Upload in background (lookup + direct R2 in cloud mode)
           (async () => {
             try {
-              const bytes = await file.arrayBuffer();
-              const hash = await sha256Hex(bytes);
               const { data: authData } = await (await import("@/lib/supabase/client")).createClient().auth.getSession();
               const token = authData.session?.access_token;
               if (!token) return;
-              const authHdr: Record<string, string> = { Authorization: `Bearer ${token}` };
-
-              try {
-                const lk = await fetch(`/api/lookup-asset?hash=${hash}`, { headers: authHdr });
-                const { cdnUrl } = await lk.json() as { cdnUrl: string | null };
-                if (cdnUrl) { updateNodeDataRef.current(nodeId, { inputImage: cdnUrl, r2Url: cdnUrl }); return; }
-              } catch { /* fall through */ }
-
-              const res = await fetch("/api/upload-asset", {
-                method: "POST",
-                headers: { "Content-Type": file.type || "image/jpeg", ...authHdr },
-                body: bytes,
-              });
-              const { cdnUrl } = await res.json() as { cdnUrl?: string };
-              if (cdnUrl) updateNodeDataRef.current(nodeId, { inputImage: cdnUrl, r2Url: cdnUrl });
+              const cdnUrl = await uploadAssetFile(file, token);
+              updateNodeDataRef.current(nodeId, { inputImage: cdnUrl, r2Url: cdnUrl });
             } catch { /* blob URL stays as fallback */ }
           })();
 
@@ -579,26 +564,11 @@ export default function WorkflowCanvas() {
 
           (async () => {
             try {
-              const bytes = await file.arrayBuffer();
-              const hash = await sha256Hex(bytes);
               const { data: authData } = await (await import("@/lib/supabase/client")).createClient().auth.getSession();
               const token = authData.session?.access_token;
               if (!token) return;
-              const authHdr: Record<string, string> = { Authorization: `Bearer ${token}` };
-
-              try {
-                const lk = await fetch(`/api/lookup-asset?hash=${hash}`, { headers: authHdr });
-                const { cdnUrl } = await lk.json() as { cdnUrl: string | null };
-                if (cdnUrl) { updateNodeDataRef.current(nodeId, { videoUrl: cdnUrl }); return; }
-              } catch { /* fall through */ }
-
-              const res = await fetch("/api/upload-asset", {
-                method: "POST",
-                headers: { "Content-Type": file.type || "video/mp4", ...authHdr },
-                body: bytes,
-              });
-              const { cdnUrl } = await (await res.json()) as { cdnUrl?: string };
-              if (cdnUrl) updateNodeDataRef.current(nodeId, { videoUrl: cdnUrl });
+              const cdnUrl = await uploadAssetFile(file, token);
+              updateNodeDataRef.current(nodeId, { videoUrl: cdnUrl });
             } catch { /* blob URL stays as fallback */ }
           })();
         }

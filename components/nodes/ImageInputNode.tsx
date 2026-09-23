@@ -7,6 +7,7 @@ import CornerResizer from "./CornerResizer";
 import { useWorkflowStore, NodeData } from "@/lib/store";
 import { createClient } from "@/lib/supabase/client";
 import { sha256Hex } from "@/lib/assetHash";
+import { uploadAssetFile } from "@/lib/uploadAssetClient";
 
 
 type ImageInputNodeType = Node<NodeData, "imageInputNode">;
@@ -154,17 +155,10 @@ export default function ImageInputNode({ id, data, selected }: NodeProps<ImageIn
       };
       img.src = blobUrl;
 
-      // ── Upload raw bytes to R2 (hash stored server-side) ──────────────────
+      // ── Upload to R2 (direct PUT in cloud; proxy in guest mode) ───────────
       try {
-        const uploadHeaders: Record<string, string> = {
-          "Content-Type": file.type || "image/jpeg",
-          ...authHeaders,
-        };
-        const res     = await fetch("/api/upload-asset", { method: "POST", headers: uploadHeaders, body: bytes });
-        const { cdnUrl } = await res.json() as { cdnUrl?: string };
-        if (cdnUrl) {
-          updateNodeData(id, { r2Url: cdnUrl, inputImage: cdnUrl });
-        }
+        const cdnUrl = await uploadAssetFile(file, authToken);
+        updateNodeData(id, { r2Url: cdnUrl, inputImage: cdnUrl });
       } catch {
         // R2 unavailable — blob URL stays as fallback until page reload
       }

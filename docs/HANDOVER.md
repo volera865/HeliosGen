@@ -205,10 +205,48 @@ Note: the workflow canvas has no audio input node yet — gallery upload is the 
 
 ### Upload size limits
 
-- Vercel request bodies are roughly **4.5 MB**.
-- Binary uploads (`upload-asset`, `upload-video`, `fetch-url`): capped at **~4 MB**.
-- JSON data-URL uploads (`upload-to-r2`): capped at **~3 MB decoded**.
+- Vercel request bodies are roughly **4.5 MB**. Proxy routes that still accept bodies (`upload-asset`, `upload-video`, `fetch-url`) stay capped at **~4 MB**.
+- **Cloud (production) user uploads** use direct-to-R2: browser → `POST /api/upload-presign` → `PUT` to R2 → `POST /api/upload-complete`. App cap is **100 MB**. File bytes never enter a Vercel function.
+- Guest / local mode still uses `POST /api/upload-asset` (4 MB) because files land on local disk.
+- JSON data-URL uploads (`upload-to-r2`): capped at **~3 MB decoded** (small/base64 flows only).
 - Allowed MIME types: png, jpeg, webp, gif, mp4, webm, mov, mp3, wav, m4a (and matching audio MIME variants used by the allowlist).
+
+### R2 CORS (required for direct browser PUT)
+
+Without CORS, the browser `PUT` to the presigned URL fails even when credentials are correct.
+
+On the production bucket (e.g. `higgsfield1`), set CORS rules:
+
+| Setting | Value |
+|---------|--------|
+| Allowed origins | Production origin (e.g. `https://higgsfield-n7pq.vercel.app`) and `http://localhost:3000` for local cloud-mode testing |
+| Allowed methods | `PUT`, `GET`, `HEAD` |
+| Allowed headers | `Content-Type` |
+| Max age | `3600` |
+
+Cloudflare dashboard: R2 → bucket → Settings → CORS policy. Example JSON:
+
+```json
+[
+  {
+    "AllowedOrigins": [
+      "https://higgsfield-n7pq.vercel.app",
+      "http://localhost:3000"
+    ],
+    "AllowedMethods": ["PUT", "GET", "HEAD"],
+    "AllowedHeaders": ["Content-Type"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+### Verify uploads after deploy
+
+1. Sign in on Production (guest mode off).
+2. Upload an image or audio **larger than 4 MB** from Gallery or a canvas input node.
+3. In DevTools → Network: expect a small `POST /api/upload-presign`, then a `PUT` to `*.r2.cloudflarestorage.com` (or the signed host), then `POST /api/upload-complete` — **not** a multi-MB `POST /api/upload-asset`.
+4. Open the returned CDN URL (`R2_PUBLIC_URL/...`) in a new tab; it should load.
+5. Local smoke (optional): with guest off and R2 env set, `node scripts/smoke-direct-upload.mjs` exercises presign → PUT → HEAD on the CDN URL.
 
 ## 6. Troubleshooting
 
@@ -218,7 +256,8 @@ Note: the workflow canvas has no audio input node yet — gallery upload is the 
 | **401** on generate / upload | Missing session or missing per-user kie key | Sign in; Settings → save kie.ai key; Bearer or cookie session present |
 | **429** from generate | kie.ai rate limit | Wait and retry; message: rate limiting — wait a few seconds |
 | Empty / insufficient **balance** | kie.ai account out of credits | Message: not enough credits — account owner adds credits |
-| Files not loading | Bad `R2_PUBLIC_URL`, allowlist, or CORS | CDN URL opens in browser; download allowlist includes R2 + kie hosts |
+| Large upload fails with **413** on Production | Hitting proxy `/api/upload-asset` or CORS blocking PUT | Network should show PUT to R2; set bucket CORS; client uses `uploadAssetFile` |
+| Direct PUT fails (CORS / opaque error) | Missing R2 CORS for the site origin | Add Production + localhost origins; methods PUT/GET/HEAD; header Content-Type |
 | Invite / reset link problems | Wrong email template or Site URL | Templates must use `/api/auth/callback?token_hash=…&type=invite\|recovery`; Site URL matches deployment; `AuthEvents` mounted |
 
 ## Notes for operators

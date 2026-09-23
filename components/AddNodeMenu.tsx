@@ -5,6 +5,7 @@ import { useReactFlow } from "@xyflow/react";
 import { useWorkflowStore, NodeData } from "@/lib/store";
 import { NODES, NODE_SIZE, FALLBACK_SIZE, NODE_META, getLastNodeSettings, getDefaultNodeSize } from "@/lib/nodeTypes";
 import { getToken } from "@/lib/galleryUtils";
+import { uploadAssetFile } from "@/lib/uploadAssetClient";
 import { MediaPickerModal } from "@/components/MediaPickerModal";
 
 import { Search, X, Upload, LayoutGrid } from "lucide-react";
@@ -184,27 +185,15 @@ export default function AddNodeMenu({ anchorRect, onClose }: AddNodeMenuProps) {
         img.src = blobUrl;
       }
 
-      const bytes = await file.arrayBuffer();
       const token = await getToken();
       if (!token) { useWorkflowStore.getState().setAuthModalOpen(true); return; }
-      const headers: Record<string, string> = {
-        "Content-Type": file.type || (isVideo ? "video/mp4" : "image/jpeg"),
-        Authorization: `Bearer ${token}`,
-      };
       try {
-        const res = await fetch("/api/upload-asset", {
-          method: "POST",
-          headers,
-          body: bytes,
-        });
-        const { cdnUrl } = await res.json() as { cdnUrl?: string };
-        if (cdnUrl) {
-          URL.revokeObjectURL(blobUrl);
-          useWorkflowStore.getState().updateNodeData(
-            nodeId,
-            isVideo ? { videoUrl: cdnUrl } : { inputImage: cdnUrl, r2Url: cdnUrl },
-          );
-        }
+        const cdnUrl = await uploadAssetFile(file, token);
+        URL.revokeObjectURL(blobUrl);
+        useWorkflowStore.getState().updateNodeData(
+          nodeId,
+          isVideo ? { videoUrl: cdnUrl } : { inputImage: cdnUrl, r2Url: cdnUrl },
+        );
       } catch {
         // blob URL stays as fallback until page reload
       }

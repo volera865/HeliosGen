@@ -7,10 +7,15 @@ import { useWorkflowStore, NodeData } from "@/lib/store";
 import { VIDEO_MODELS } from "@/lib/modelConfig";
 import { createClient } from "@/lib/supabase/client";
 import { sha256Hex } from "@/lib/assetHash";
+import { uploadAssetFile } from "@/lib/uploadAssetClient";
+import { DIRECT_UPLOAD_MAX_BYTES, PROXY_UPLOAD_MAX_BYTES } from "@/lib/uploadLimits";
 
 type VideoInputNodeType = Node<NodeData, "videoInputNode">;
 
-const MAX_BYTES = 4 * 1024 * 1024; // 4 MB (Vercel body limit)
+const MAX_BYTES =
+  process.env.NEXT_PUBLIC_GUEST_MODE === "true"
+    ? PROXY_UPLOAD_MAX_BYTES
+    : DIRECT_UPLOAD_MAX_BYTES;
 const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 const IMAGE_HANDLES = new Set(["startFrame", "endFrame", "resource", "image"]);
 
@@ -259,29 +264,20 @@ export default function VideoInputNode({ id, data, selected }: NodeProps<VideoIn
         }, { once: true });
       });
 
-      const bytes = await blob.arrayBuffer();
       const { data: authData } = await createClient().auth.getSession();
       const token = authData.session?.access_token;
       if (!token) { setCaptureErr("Sign in required"); return; }
-      const authHeaders: Record<string, string> = { Authorization: `Bearer ${token}` };
 
-      const res  = await fetch("/api/upload-asset", {
-        method: "POST",
-        headers: { "Content-Type": "image/jpeg", ...authHeaders },
-        body: bytes,
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "Upload failed");
+      const frameFile = new File([blob], "frame.jpg", { type: "image/jpeg" });
+      const cdnUrl = await uploadAssetFile(frameFile, token);
 
-      if (json.cdnUrl) {
-        updateNodeData(id, { capturedFrameUrl: json.cdnUrl, capturedFrameBlurUrl: blurDataUrl });
-        // Also update any connected ImageInputNodes
-        const pickEdges = edges.filter((e) => e.source === id && e.sourceHandle === "imagePickOut");
-        for (const pe of pickEdges) {
-          const tgt = nodes.find((n) => n.id === pe.target);
-          if (tgt?.type === "imageInputNode") {
-            updateNodeData(tgt.id, { r2Url: json.cdnUrl, inputImage: json.cdnUrl });
-          }
+      updateNodeData(id, { capturedFrameUrl: cdnUrl, capturedFrameBlurUrl: blurDataUrl });
+      // Also update any connected ImageInputNodes
+      const pickEdges = edges.filter((e) => e.source === id && e.sourceHandle === "imagePickOut");
+      for (const pe of pickEdges) {
+        const tgt = nodes.find((n) => n.id === pe.target);
+        if (tgt?.type === "imageInputNode") {
+          updateNodeData(tgt.id, { r2Url: cdnUrl, inputImage: cdnUrl });
         }
       }
       setPickerOpen(false);
@@ -400,7 +396,14 @@ export default function VideoInputNode({ id, data, selected }: NodeProps<VideoIn
     setUploadErr(null);
 
     if (!file.type.startsWith("video/")) { setUploadErr("Please select a video file"); return; }
-    if (file.size > MAX_BYTES) { setUploadErr("Video exceeds the 4 MB limit"); return; }
+    if (file.size > MAX_BYTES) {
+      setUploadErr(
+        process.env.NEXT_PUBLIC_GUEST_MODE === "true"
+          ? "Video exceeds the 4 MB limit"
+          : "Video exceeds the 100 MB limit",
+      );
+      return;
+    }
 
     const bytes = await file.arrayBuffer();
     const hash  = await sha256Hex(bytes);
@@ -425,16 +428,10 @@ export default function VideoInputNode({ id, data, selected }: NodeProps<VideoIn
     setUploading(true);
 
     try {
-      const res  = await fetch("/api/upload-asset", {
-        method: "POST",
-        headers: { "Content-Type": file.type || "video/mp4", ...authHeaders },
-        body: bytes,
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "Upload failed");
+      const cdnUrl = await uploadAssetFile(file, token);
       URL.revokeObjectURL(blobUrl);
       localUrlRef.current = null;
-      updateNodeData(id, { videoUrl: json.cdnUrl });
+      updateNodeData(id, { videoUrl: cdnUrl });
     } catch (e) {
       setUploadErr(e instanceof Error ? e.message : "Upload failed");
     } finally {
