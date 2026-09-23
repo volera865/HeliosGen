@@ -28,9 +28,16 @@ import {
   talkingModelForRoute,
   talkingVoiceStatus,
   talkingPipelineHelper,
+  talkingUsageNote,
   isSeedanceTalkingFamily,
   type TalkingVoice,
 } from "@/lib/talkingPrompt";
+import {
+  getModelGuidance,
+  guidanceForDropdownOption,
+  type ModelGuidanceContext,
+} from "@/lib/modelGuidance";
+import { ModelGuidanceStrip } from "@/components/ModelGuidanceStrip";
 
 const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 
@@ -1822,6 +1829,31 @@ function GalleryInner() {
     return imgModel.apiInput.promptMaxLength;
   })();
   const promptOverLimit = promptMaxLength !== null && prompt.length > promptMaxLength;
+
+  const modelGuidance = useMemo(() => {
+    const ctx: ModelGuidanceContext = {
+      tab: isVideo ? "videos" : "images",
+      modelId,
+      hasPrompt: prompt.trim().length > 0,
+      hasRefImages: refImages.some(r => !!r.cdnUrl || !!r.objectUrl),
+      refImageCount: refImages.length,
+      hasStartFrame: !!vidStartFrame,
+      hasEndFrame: !!vidEndFrame,
+      hasResources: vidResources.length > 0 || vidElements.length > 0,
+      resourceCount: vidResources.length + vidElements.length,
+      hasReferenceVideo: vidRefVideos.length > 0,
+      hasMotionVideoRef: !!vidVideoRef,
+      hasAudioRef: vidRefAudios.length > 0,
+      hasElements: vidElements.length > 0,
+      talkingMode,
+      sound,
+    };
+    return getModelGuidance(ctx);
+  }, [
+    isVideo, modelId, prompt, refImages,
+    vidStartFrame, vidEndFrame, vidResources, vidElements,
+    vidRefVideos, vidVideoRef, vidRefAudios, talkingMode, sound,
+  ]);
 
   const handleFilePick = async (files: FileList) => {
     if (!imgModel?.supportsImages) return;
@@ -4022,16 +4054,12 @@ function GalleryInner() {
                 <div style={{ padding: "14px 16px 14px", display: "flex", flexDirection: "column", gap: "10px" }} onPointerUp={() => { if (_reorderDragItem) { _reorderDragItem = null; _reorderOverId = null; setDraggingId(null); setReorderOverId(null); } }}>
                   {talkingMode ? (
                     <p style={{ margin: 0, fontSize: "12px", color: "rgba(255,255,255,0.45)", lineHeight: 1.4 }}>
-                      {talkingRoute === "lip-sync"
-                        ? "Lip-sync: voice comes from your audio. Face + audio required."
-                        : talkingRoute === "audio-only"
-                          ? "Audio only: the model invents a speaker for this track. Voice comes from your audio."
-                          : "Add an optional face, pick Woman / Man / Boy, and describe the topic. No audio upload."}
+                      {talkingUsageNote(talkingRoute)}
                       {" "}{talkingPipelineHelper()}
                     </p>
                   ) : isAvatar && (
                     <p style={{ margin: 0, fontSize: "12px", color: "rgba(255,255,255,0.45)", lineHeight: 1.4 }}>
-                      Upload one face image and one audio file (MP3 recommended, under 100 MB).
+                      Upload one face image and one audio file (MP3 recommended, under 100 MB). Lips move to that audio — the prompt is optional direction, not what they say.
                     </p>
                   )}
                   <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "flex-start" }}>
@@ -4522,9 +4550,9 @@ function GalleryInner() {
             })()}
 
             {/* Bottom row: controls + generate button — always stays at the bottom, never moves on expand */}
-            <div style={{ display: "flex", alignItems: "center", gap: "12px", borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "12px", marginTop: promptExpanded ? "auto" : "4px" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px", borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "12px", marginTop: promptExpanded ? "auto" : "4px" }}>
               {/* Controls group */}
-              <div style={{ flex: 1, display: "flex", alignItems: "center", gap: "7px", flexWrap: "wrap" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "7px", flexWrap: "wrap" }}>
                 {/* Model picker — Talking shows the auto-routed model instead of the full list */}
                 {isVideo && talkingMode ? (
                 <CustomDropdown
@@ -4549,6 +4577,7 @@ function GalleryInner() {
                     label: m.name,
                     group: ("provider" in m ? (m as { provider: string }).provider : undefined),
                     providerIcon: "provider" in m ? <ProviderIcon provider={(m as { provider: string }).provider} /> : undefined,
+                    description: guidanceForDropdownOption(m.id),
                   }))}
                   showChevron
                 />
@@ -5018,6 +5047,10 @@ function GalleryInner() {
                   )}
                 </Button>
               </div>
+              <ModelGuidanceStrip
+                guidance={modelGuidance}
+                onTryModel={talkingMode && isVideo ? undefined : setModelId}
+              />
             </div>{/* end bottom row */}
           </div>
         </div>
@@ -5338,6 +5371,7 @@ interface DropOption {
   group?: string;
   preview?: React.ReactNode;
   providerIcon?: React.ReactNode;
+  description?: string;
 }
 
 // ── Element picker modal ─────────────────────────────────────────────────────
@@ -5698,6 +5732,7 @@ function CustomDropdown({
   }, {});
   const groupKeys = Object.keys(groups);
   const hasGroups = groupKeys.some(k => k !== "");
+  const hasDescriptions = options.some(o => !!o.description);
 
   return (
     <>
@@ -5764,7 +5799,8 @@ function CustomDropdown({
             position: "fixed",
             left: pos.left,
             bottom: pos.bottom,
-            minWidth: Math.max(pos.minW, 160),
+            minWidth: Math.max(pos.minW, hasDescriptions ? 260 : 160),
+            maxWidth: hasDescriptions ? 340 : undefined,
             background: "#0E1012",
             border: "1px solid rgba(255,255,255,0.1)",
             borderRadius: "14px",
@@ -5801,6 +5837,7 @@ function CustomDropdown({
                       onClick={() => { onChange(opt.value); setOpen(false); }}
                       preview={opt.preview}
                       providerIcon={opt.providerIcon}
+                      description={opt.description}
                     />
                   ))}
                 </div>
@@ -5814,6 +5851,7 @@ function CustomDropdown({
                   onClick={() => { onChange(opt.value); setOpen(false); }}
                   preview={opt.preview}
                   providerIcon={opt.providerIcon}
+                  description={opt.description}
                 />
               ))
             )}
@@ -6079,7 +6117,21 @@ function AspectRatioDropdown({
   );
 }
 
-function DropItem({ label, active, onClick, preview, providerIcon }: { label: string; active: boolean; onClick: () => void; preview?: React.ReactNode; providerIcon?: React.ReactNode }) {
+function DropItem({
+  label,
+  active,
+  onClick,
+  preview,
+  providerIcon,
+  description,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  preview?: React.ReactNode;
+  providerIcon?: React.ReactNode;
+  description?: string;
+}) {
   const [hovered, setHovered] = useState(false);
   return (
     <button
@@ -6088,10 +6140,10 @@ function DropItem({ label, active, onClick, preview, providerIcon }: { label: st
       onMouseLeave={() => setHovered(false)}
       style={{
         display: "flex",
-        alignItems: "center",
+        alignItems: description ? "flex-start" : "center",
         gap: "8px",
         width: "100%",
-        padding: "7px 10px",
+        padding: description ? "8px 10px" : "7px 10px",
         borderRadius: "9px",
         border: "none",
         background: active
@@ -6105,16 +6157,36 @@ function DropItem({ label, active, onClick, preview, providerIcon }: { label: st
         transition: "background 100ms, color 100ms",
         fontFamily: "inherit",
         letterSpacing: "-0.01em",
-        whiteSpace: "nowrap",
+        whiteSpace: description ? "normal" : "nowrap",
       }}
     >
       {providerIcon && (
-        <span style={{ display: "flex", alignItems: "center", color: "#2DD4BF", flexShrink: 0, opacity: active ? 1 : 0.7 }}>
+        <span style={{
+          display: "flex",
+          alignItems: "center",
+          color: "#2DD4BF",
+          flexShrink: 0,
+          opacity: active ? 1 : 0.7,
+          marginTop: description ? "2px" : 0,
+        }}>
           {providerIcon}
         </span>
       )}
       {preview}
-      {label}
+      <span style={{ display: "flex", flexDirection: "column", gap: "2px", minWidth: 0, flex: 1 }}>
+        <span>{label}</span>
+        {description && (
+          <span style={{
+            fontSize: "11px",
+            fontWeight: 400,
+            lineHeight: 1.35,
+            color: active ? "rgba(255,255,255,0.45)" : "rgba(255,255,255,0.32)",
+            whiteSpace: "normal",
+          }}>
+            {description}
+          </span>
+        )}
+      </span>
     </button>
   );
 }

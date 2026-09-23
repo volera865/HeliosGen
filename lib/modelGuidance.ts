@@ -1,4 +1,5 @@
 import { IMAGE_MODELS, VIDEO_MODELS, type VideoHandle } from "@/lib/modelConfig";
+import { resolveTalkingRoute } from "@/lib/talkingPrompt";
 
 export type ModelGuidanceContext = {
   tab: "images" | "videos";
@@ -28,29 +29,29 @@ export type ModelGuidanceResult = {
 
 /** Static one-liners for model dropdown (capability headline). */
 const DROPDOWN_BLURBS: Record<string, string> = {
-  "google-nano-banana": "Text-to-image only.",
-  "nano-banana-2": "Text + refs, quality tiers.",
-  "nano-banana-pro": "Text + many reference images.",
-  "nano-banana-2-lite": "Text + refs, fast drafts.",
+  "google-nano-banana": "Text-to-image only — no reference images.",
+  "nano-banana-2": "Text + refs, with quality tiers (up to 14 images).",
+  "nano-banana-pro": "Best for many reference images (up to 8).",
+  "nano-banana-2-lite": "Fast drafts with text + refs (up to 10).",
   "z-image": "Stylized text-to-image.",
-  "seedream-5-lite": "Lightweight stills.",
+  "seedream-5-lite": "Lightweight stills — quick iterations.",
   "seedream-5-pro": "Higher-fidelity stills.",
-  "grok-imagine-image": "Grok image, flexible ratios.",
-  "gpt-image-2": "Azure GPT Image layouts.",
-  veo3_lite: "Text or 1–2 frames (no ref assets).",
-  veo3_fast: "Text, frames, or reference images.",
+  "grok-imagine-image": "Grok image — flexible aspect ratios.",
+  "gpt-image-2": "Azure GPT Image — layouts and text in images.",
+  veo3_lite: "Text or 1–2 frames (no reference assets).",
+  veo3_fast: "Text, frames, or reference images — good default.",
   veo3: "Best Veo quality; frames + references.",
   "gemini-omni-video": "Text, refs, and reference video.",
-  "kling-3.0": "Text, frames, refs, sound, elements.",
+  "kling-3.0": "Text, frames, refs, sound, and elements.",
   "kling-3.0-turbo": "Fast text or start-frame video.",
   "kling-ai-avatar-standard": "Face image + audio lip-sync.",
-  "kling-ai-avatar-pro": "Pro avatar lip-sync.",
+  "kling-ai-avatar-pro": "Pro avatar lip-sync (higher quality).",
   "grok-imagine": "Text + tagged reference images.",
   "grok-imagine-1-5-preview": "Reference image drives the clip.",
-  "seedance-2": "Text, frames, refs, audio, ref video.",
+  "seedance-2": "Text, frames, refs, audio, and ref video.",
   "seedance-2-fast": "Same inputs as Seedance 2, faster.",
   "seedance-2-mini": "Budget multimodal Seedance.",
-  "seedance-2-5": "Long runs, heavy reference sets.",
+  "seedance-2-5": "Long runs and heavy reference sets.",
   "seedance-2-5-edit": "Requires reference video to edit.",
   happyhorse: "Text, optional start frame + refs.",
   "kling-2.6-motion-control": "Subject frame + motion video.",
@@ -322,11 +323,31 @@ function imageScenarioLabel(ctx: ModelGuidanceContext): string | undefined {
 
 export function getModelGuidance(ctx: ModelGuidanceContext): ModelGuidanceResult {
   if (ctx.tab === "videos" && ctx.talkingMode) {
+    const route = resolveTalkingRoute({
+      hasFace: ctx.hasStartFrame,
+      hasAudio: ctx.hasAudioRef,
+    });
+    if (route === "lip-sync") {
+      return {
+        summary: "Uploaded audio is spoken — lips follow that track. Prompt steers motion only.",
+        fit: "good",
+        scenarioLabel: "Face + audio (lip-sync)",
+        tips: ["The prompt does not change the words; swap the audio file to change what they say."],
+      };
+    }
+    if (route === "audio-only") {
+      return {
+        summary: "Your audio is the voice; the model invents a speaker for the track.",
+        fit: "good",
+        scenarioLabel: "Audio only (talking)",
+        tips: ["Add a face image to lip-sync a specific person to this audio."],
+      };
+    }
     return {
-      summary: "Talking mode routes face + audio through the avatar pipeline automatically.",
+      summary: "No audio — the app speaks your prompt text immediately with the selected voice.",
       fit: "good",
-      scenarioLabel: "Image + audio (talking)",
-      tips: ["Enable Talking and attach a face frame plus audio."],
+      scenarioLabel: "Text spoken (talking)",
+      tips: ["Put dialogue in quotes so only that part is spoken; other lines steer the picture."],
     };
   }
 
@@ -380,8 +401,18 @@ export function getModelGuidance(ctx: ModelGuidanceContext): ModelGuidanceResult
     DROPDOWN_BLURBS[ctx.modelId] ?? `Generate with ${modelName(ctx.modelId, "images")}.`;
   let fit: ModelGuidanceResult["fit"] = "good";
   let suggestion: ModelGuidanceResult["suggestion"];
+  const tips: string[] = [];
 
-  if (ctx.refImageCount >= 4 && (ctx.modelId === "nano-banana-2-lite" || ctx.modelId === "google-nano-banana")) {
+  // Text-only Nano Banana cannot use reference images
+  if (ctx.hasRefImages && ctx.modelId === "google-nano-banana") {
+    fit = "mismatch";
+    const target = ctx.refImageCount >= 6 ? "nano-banana-pro" : "nano-banana-2";
+    suggestion = {
+      modelId: target,
+      label: modelName(target, "images"),
+      reason: "Nano Banana is text-only — switch to use your reference images.",
+    };
+  } else if (ctx.refImageCount >= 4 && (ctx.modelId === "nano-banana-2-lite" || ctx.modelId === "google-nano-banana")) {
     const target = ctx.refImageCount >= 6 ? "nano-banana-pro" : "nano-banana-2";
     fit = "mismatch";
     suggestion = {
@@ -401,6 +432,10 @@ export function getModelGuidance(ctx: ModelGuidanceContext): ModelGuidanceResult
     };
   }
 
+  if (ctx.modelId === "google-nano-banana" && !ctx.hasRefImages && ctx.hasPrompt) {
+    tips.push("Best for a prompt-only still with no reference images.");
+  }
+
   if (suggestion?.modelId === ctx.modelId) {
     suggestion = undefined;
     fit = "good";
@@ -408,9 +443,13 @@ export function getModelGuidance(ctx: ModelGuidanceContext): ModelGuidanceResult
 
   const scenarioLabel = imageScenarioLabel(ctx);
   return {
-    summary,
+    summary:
+      fit === "mismatch" && ctx.modelId === "google-nano-banana" && ctx.hasRefImages
+        ? "Nano Banana ignores reference images — pick a model that supports refs."
+        : summary,
     fit,
     scenarioLabel,
+    tips: tips.length ? tips : undefined,
     suggestion,
   };
 }

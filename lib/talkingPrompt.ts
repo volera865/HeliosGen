@@ -78,8 +78,19 @@ export function spokenTextForDuration(raw: string, durationSec: number): string 
   return capSpoken(text, durationSec);
 }
 
+/** How Talking works for the current route (shown above slots). */
+export function talkingUsageNote(route: TalkingRoute): string {
+  if (route === "lip-sync") {
+    return "Lip-sync: your uploaded audio is what they say. The prompt steers motion, not the words. Face + audio required.";
+  }
+  if (route === "audio-only") {
+    return "Audio only: your uploaded track is the voice; the model invents a speaker for it.";
+  }
+  return "No audio uploaded — the text you type is spoken aloud right away. Pick Woman / Man / Boy. Add an optional face.";
+}
+
 export function talkingPipelineHelper(): string {
-  return "Words in quotation marks are spoken. The rest is picture direction. A real song needs uploaded audio. Do not use photos of famous people.";
+  return "Put dialogue in quotation marks to speak only that part; other lines are picture direction. A real song needs uploaded audio. Do not use photos of famous people.";
 }
 
 const VOICE_LINES: Record<TalkingVoice, string> = {
