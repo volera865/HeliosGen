@@ -1,11 +1,15 @@
 import { jobStore, type JobResult } from "@/lib/jobStore";
-import { jobEvents } from "@/lib/jobEvents";
-import { mirrorToR2 } from "@/lib/r2";
+import { getKieTokenForUser } from "@/lib/getKieToken";
+import { normalizeKiePhase } from "@/lib/genProgress";
+import { extractAllowlistedKieUrls } from "@/lib/kieResultUrls";
+import {
+  persistGenerationError,
+  settleEarlyThenMirror,
+} from "@/lib/generationSettle";
+import { persistProgressPhase } from "@/lib/progressPhase";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { GUEST_MODE } from "@/lib/guestMode";
 import * as guestDb from "@/lib/guest/db";
-import { getKieTokenForUser } from "@/lib/getKieToken";
-import { normalizeKiePhase } from "@/lib/genProgress";
 
 const RECORD_INFO = "https://api.kie.ai/api/v1/jobs/recordInfo";
 
@@ -19,46 +23,8 @@ type GenerationRow = {
   error_msg?: string | null;
   user_id?: string | null;
   generation_type?: string | null;
+  progress_phase?: string | null;
 };
-
-function isPublicHttpsUrl(url: string): boolean {
-  try {
-    const u = new URL(url);
-    if (u.protocol !== "https:") return false;
-    const host = u.hostname.toLowerCase();
-    if (host === "localhost" || host.endsWith(".localhost")) return false;
-    if (host === "127.0.0.1" || host === "::1" || host === "0.0.0.0") return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function extractUrls(resultJson?: unknown, extra?: Record<string, unknown>): string[] {
-  const urls: string[] = [];
-  const push = (value: unknown) => {
-    if (typeof value === "string" && value) urls.push(value);
-    else if (Array.isArray(value)) value.filter((v) => typeof v === "string" && v).forEach((v) => urls.push(v));
-  };
-
-  let parsed: unknown = resultJson;
-  if (typeof resultJson === "string" && resultJson.trim()) {
-    try {
-      parsed = JSON.parse(resultJson);
-    } catch {
-      parsed = null;
-    }
-  }
-  if (parsed && typeof parsed === "object") {
-    const obj = parsed as Record<string, unknown>;
-    push(obj.resultUrls ?? obj.resultUrl ?? obj.videoUrl ?? obj.imageUrl ?? obj.output);
-  }
-  if (extra) {
-    push(extra.videoUrl);
-    push(extra.output);
-  }
-  return [...new Set(urls.filter(isPublicHttpsUrl))];
-}
 
 function toJobResult(gen: GenerationRow): JobResult | null {
   if (gen.status === "done") {
@@ -76,57 +42,10 @@ async function loadGeneration(taskId: string): Promise<GenerationRow | null> {
   if (GUEST_MODE) return guestDb.recoverJob(taskId);
   const { data } = await supabaseAdmin
     .from("generations")
-    .select("status, video_url, image_url, image_urls, error_msg, user_id, generation_type")
+    .select("status, video_url, image_url, image_urls, error_msg, user_id, generation_type, progress_phase")
     .eq("task_id", taskId)
     .single();
   return data ?? null;
-}
-
-function settle(taskId: string, result: JobResult): JobResult {
-  jobStore.set(taskId, result);
-  jobEvents.emit(`job:${taskId}`, result);
-  return result;
-}
-
-async function persistDone(taskId: string, isVideo: boolean, storedUrls: string[]): Promise<JobResult> {
-  const result: JobResult = isVideo
-    ? { status: "done", videoUrl: storedUrls[0] }
-    : { status: "done", imageUrl: storedUrls[0], imageUrls: storedUrls };
-
-  if (GUEST_MODE) {
-    guestDb.updateGeneration(
-      taskId,
-      isVideo
-        ? { status: "done", video_url: storedUrls[0] }
-        : { status: "done", image_url: storedUrls[0], image_urls: storedUrls },
-    );
-  } else {
-    const { error } = await supabaseAdmin
-      .from("generations")
-      .update(
-        isVideo
-          ? { status: "done", video_url: storedUrls[0] }
-          : { status: "done", image_url: storedUrls[0], image_urls: storedUrls },
-      )
-      .eq("task_id", taskId);
-    if (error) console.error("[kie-sync] supabase update failed:", error.message);
-  }
-
-  return settle(taskId, result);
-}
-
-async function persistError(taskId: string, error: string): Promise<JobResult> {
-  const result: JobResult = { status: "error", error };
-  if (GUEST_MODE) {
-    guestDb.updateGeneration(taskId, { status: "error", error_msg: error });
-  } else {
-    const { error: e } = await supabaseAdmin
-      .from("generations")
-      .update({ status: "error", error_msg: error })
-      .eq("task_id", taskId);
-    if (e) console.error("[kie-sync] supabase error update failed:", e.message);
-  }
-  return settle(taskId, result);
 }
 
 async function fetchKieRecord(taskId: string, apiKey: string): Promise<Record<string, unknown> | null> {
@@ -171,31 +90,29 @@ async function syncOnce(taskId: string, userId: string): Promise<JobResult | nul
   if (state === "fail" || state === "failed" || state === "error") {
     const error = String(data.failMsg ?? data.error ?? "Generation failed");
     console.error("[kie-sync]", taskId.slice(0, 8), "fail:", error);
-    return persistError(taskId, error);
+    return persistGenerationError(taskId, error);
   }
-  if (state !== "success") return { status: "pending", phase: normalizeKiePhase(state) };
+  if (state !== "success") {
+    const phase = normalizeKiePhase(state);
+    void persistProgressPhase(taskId, phase);
+    return { status: "pending", phase };
+  }
 
   jobStore.set(taskId, { status: "pending", phase: "saving" });
+  void persistProgressPhase(taskId, "saving");
 
-  const kieUrls = extractUrls(data.resultJson, data);
+  const kieUrls = extractAllowlistedKieUrls(data.resultJson, data);
   if (kieUrls.length === 0) {
-    console.error("[kie-sync] success but no result URL for", taskId);
-    return { status: "pending", phase: "saving" };
+    console.error("[kie-sync] success but no allowlisted URL for", taskId);
+    return persistGenerationError(taskId, "Result URL missing — retry or contact support");
   }
 
   const isVideo = gen.generation_type === "video"
     || (jobStore.get(taskId)?.status === "pending" && (jobStore.get(taskId) as { type?: string }).type === "video");
-  const folder = isVideo ? "videos" : "images";
 
-  let storedUrls: string[];
-  try {
-    storedUrls = await Promise.all(kieUrls.map((u) => mirrorToR2(u, folder)));
-  } catch (err) {
-    console.error("[kie-sync] mirror failed, using source URLs:", (err as Error).message);
-    storedUrls = kieUrls;
-  }
-
-  return persistDone(taskId, isVideo, storedUrls);
+  return settleEarlyThenMirror(taskId, isVideo, kieUrls, (work) => {
+    void work();
+  });
 }
 
 /** Pull a pending Kie job into local storage if it has already finished. */

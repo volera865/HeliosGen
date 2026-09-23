@@ -24,6 +24,8 @@ interface Generation {
   image_urls?: string[];
   video_url?: string;
   error_msg?: string;
+  progress_phase?: string | null;
+  pipeline_meta?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }
@@ -98,7 +100,7 @@ export function insertGeneration(data: Omit<Generation, "id" | "created_at" | "u
 
 export function updateGeneration(
   taskId: string,
-  updates: Partial<Pick<Generation, "status" | "image_url" | "image_urls" | "video_url" | "error_msg">>,
+  updates: Partial<Pick<Generation, "status" | "image_url" | "image_urls" | "video_url" | "error_msg" | "progress_phase" | "pipeline_meta">>,
 ): void {
   const db = read();
   const gen = db.generations.find((g) => g.task_id === taskId);
@@ -109,8 +111,17 @@ export function updateGeneration(
 
 export function recoverJob(
   taskId: string,
-): Pick<Generation, "status" | "video_url" | "image_url" | "image_urls" | "error_msg" | "user_id" | "generation_type"> | null {
+): Pick<Generation, "status" | "video_url" | "image_url" | "image_urls" | "error_msg" | "user_id" | "generation_type" | "progress_phase" | "pipeline_meta"> | null {
   return read().generations.find((g) => g.task_id === taskId) ?? null;
+}
+
+export function findTalkingParentByKieTaskId(kieTaskId: string): string | null {
+  const hit = read().generations.find(
+    (g) => g.task_id.startsWith("talk-")
+      && g.status === "pending"
+      && (g.pipeline_meta as { activeKieTaskId?: string } | null)?.activeKieTaskId === kieTaskId,
+  );
+  return hit?.task_id ?? null;
 }
 
 export function getGenerations(userId: string, type: "image" | "video"): Generation[] {

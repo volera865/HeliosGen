@@ -262,6 +262,26 @@ async function sectionB(tables) {
       : "no rows returned, but empty tables cannot prove Row Level Security is correct"
   );
 
+  await check("B5 generations latency columns", async () => {
+    const { error: phaseErr } = await service.from("generations").select("progress_phase").limit(1);
+    const { error: metaErr } = await service.from("generations").select("pipeline_meta").limit(1);
+    const missing = [];
+    if (phaseErr?.message?.includes("progress_phase") || phaseErr?.code === "42703") {
+      missing.push("progress_phase (run supabase-progress-phase.sql)");
+    }
+    if (metaErr?.message?.includes("pipeline_meta") || metaErr?.code === "42703") {
+      missing.push("pipeline_meta (run supabase-pipeline-meta.sql)");
+    }
+    if (phaseErr && !phaseErr.message?.includes("progress_phase") && phaseErr.code !== "42703") {
+      log("WARN", "B5 generations latency columns", `progress_phase probe: ${phaseErr.message}`);
+    }
+    if (metaErr && !metaErr.message?.includes("pipeline_meta") && metaErr.code !== "42703") {
+      log("WARN", "B5 generations latency columns", `pipeline_meta probe: ${metaErr.message}`);
+    }
+    if (missing.length) log("FAIL", "B5 generations latency columns", missing.join("; "));
+    else log("PASS", "B5 generations latency columns", "progress_phase and pipeline_meta present");
+  });
+
   await check("B4 auth settings", async () => {
     const res = await fetch(`${url}/auth/v1/settings`, { headers: { apikey: anonKey } });
     if (!res.ok) {
@@ -416,6 +436,29 @@ async function sectionD() {
   section("D. Live app");
 
   const base = (env("CALLBACK_BASE_URL") ?? "").replace(/\/$/, "");
+
+  await check("D2 callback route exists", async () => {
+    if (!base || isPlaceholder(base)) {
+      log("SKIP", "D2 callback route exists", "CALLBACK_BASE_URL is unset or a placeholder");
+      return;
+    }
+    try {
+      const res = await fetch(`${base}/api/callback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ received: true }),
+      });
+      if (res.status === 405) {
+        log("PASS", "D2 callback route exists", "route mounted (405 without POST body is ok)");
+      } else if (res.ok || res.status === 200) {
+        log("PASS", "D2 callback route exists", `HTTP ${res.status}`);
+      } else {
+        log("INFO", "D2 callback route exists", `HTTP ${res.status} — confirm Kie can POST here`);
+      }
+    } catch (err) {
+      log("WARN", "D2 callback route exists", `${err?.message ?? String(err)}`);
+    }
+  });
 
   await check("D1 callback host reachable", async () => {
     if (!base || isPlaceholder(base)) {

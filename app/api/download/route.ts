@@ -7,18 +7,11 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { GUEST_MODE } from "@/lib/guestMode";
-
-const ALLOWED_ORIGINS = [
-  process.env.R2_PUBLIC_URL ?? "",
-  "https://cdn.kie.ai",
-  "https://api.kie.ai",
-  "https://replicate.delivery",
-  "https://pbxt.replicate.delivery",
-].filter(Boolean).map((o) => o.replace(/\/$/, ""));
+import { isAllowedMediaUrl } from "@/lib/allowedMediaOrigins";
 
 function isAllowed(url: string): boolean {
   if (GUEST_MODE && url.startsWith("/generated/")) return true; // local disk, served same-origin
-  return ALLOWED_ORIGINS.some((origin) => url.startsWith(origin));
+  return isAllowedMediaUrl(url);
 }
 
 export const runtime = "edge";
