@@ -224,7 +224,7 @@ On the production bucket (e.g. `higgsfield1`), set CORS rules:
 | Allowed headers | `Content-Type` |
 | Max age | `3600` |
 
-Cloudflare dashboard: R2 → bucket → Settings → CORS policy. Example JSON:
+Cloudflare dashboard: R2 → bucket → Settings → CORS policy. Paste the ready file [`scripts/r2-cors.json`](../scripts/r2-cors.json), or:
 
 ```json
 [
@@ -235,10 +235,19 @@ Cloudflare dashboard: R2 → bucket → Settings → CORS policy. Example JSON:
     ],
     "AllowedMethods": ["PUT", "GET", "HEAD"],
     "AllowedHeaders": ["Content-Type"],
+    "ExposeHeaders": ["ETag"],
     "MaxAgeSeconds": 3600
   }
 ]
 ```
+
+Object Read & Write API tokens usually **cannot** change CORS. Prefer the dashboard (account Admin), or create an Admin R2 token and run:
+
+```bash
+node --env-file=.env scripts/apply-r2-cors.mjs
+```
+
+Symptom in the browser without this policy: CORS error on `*.r2.cloudflarestorage.com` after a successful `/api/upload-presign`.
 
 ### Verify uploads after deploy
 
