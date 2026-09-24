@@ -41,6 +41,12 @@ import { ModelGuidanceStrip } from "@/components/ModelGuidanceStrip";
 
 const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 
+/** Modifier shown on the generate shortcut (⌘ on Apple, Ctrl elsewhere). */
+const composeModKey =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent)
+    ? "⌘"
+    : "Ctrl";
+
 const DEMO_GALLERY_ITEMS: import("@/lib/galleryUtils").GalleryItem[] = [
   {
     id: "demo-1",
@@ -4174,7 +4180,7 @@ function GalleryInner() {
                     if (e.key === "Enter") { e.preventDefault(); insertMention(filteredMentions[mentionSelIdx]); return; }
                     if (e.key === "Escape") { setMentionQuery(null); return; }
                   }
-                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !submitting) { e.preventDefault(); generate(); }
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && canGenerate) { e.preventDefault(); generate(); }
                 }}
                 disabled={submitting}
                 style={{
@@ -4401,7 +4407,7 @@ function GalleryInner() {
                               if (e.key === "Enter") { e.preventDefault(); insertMention(filteredMentions[mentionSelIdx]); return; }
                               if (e.key === "Escape") { setMentionQuery(null); return; }
                             }
-                            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !submitting) { e.preventDefault(); generate(); return; }
+                            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && canGenerate) { e.preventDefault(); generate(); return; }
                             if (e.key === "Enter" && !isExpanded) {
                               // Expand collapsed block on Enter instead of inserting newline
                               e.preventDefault();
@@ -4549,10 +4555,24 @@ function GalleryInner() {
               );
             })()}
 
-            {/* Bottom row: controls + generate button — always stays at the bottom, never moves on expand */}
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px", borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "12px", marginTop: promptExpanded ? "auto" : "4px" }}>
-              {/* Controls group */}
-              <div style={{ display: "flex", alignItems: "center", gap: "7px", flexWrap: "wrap" }}>
+            {/* Bottom toolbar: controls + send on one row; guidance below */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px", borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "12px", marginTop: promptExpanded ? "auto" : "4px", minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
+              {/* Controls — single line, scroll horizontally when needed */}
+              <div
+                className="gallery-compose-toolbar"
+                style={{
+                  flex: 1,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "7px",
+                  flexWrap: "nowrap",
+                  overflowX: "auto",
+                  overflowY: "hidden",
+                  minWidth: 0,
+                  WebkitOverflowScrolling: "touch",
+                }}
+              >
                 {/* Model picker — Talking shows the auto-routed model instead of the full list */}
                 {isVideo && talkingMode ? (
                 <CustomDropdown
@@ -5000,10 +5020,10 @@ function GalleryInner() {
                   </span>
                   JSON/YAML
                 </button>
-              </div>{/* end controls group */}
+              </div>{/* end controls scroll */}
 
-              {/* Character count + Generate button */}
-              <div style={{ display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
+              {/* Character count + Generate — always same line, never wraps away */}
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", flexShrink: 0, marginLeft: "auto" }}>
                 {promptMaxLength !== null && !multiPromptMode && (
                   <div
                     aria-hidden
@@ -5014,6 +5034,7 @@ function GalleryInner() {
                       color: promptOverLimit ? "#f87171" : "rgba(255,255,255,0.3)",
                       pointerEvents: "none",
                       userSelect: "none",
+                      whiteSpace: "nowrap",
                     }}
                   >
                     {prompt.length.toLocaleString()}/{promptMaxLength.toLocaleString()}
@@ -5025,7 +5046,8 @@ function GalleryInner() {
                   disabled={!canGenerate}
                   variant="outline"
                   size="sm"
-                  className="border-none bg-[rgba(45,212,191,0.25)] text-[rgba(45,212,191,0.9)] hover:bg-[rgba(45,212,191,0.38)] hover:text-[rgba(45,212,191,0.9)] disabled:bg-[rgba(45,212,191,0.1)] disabled:text-[rgba(45,212,191,0.3)]"
+                  title={composeModKey === "Ctrl" ? "Ctrl+Enter" : "⌘+Enter"}
+                  className="border-none bg-[rgba(45,212,191,0.25)] text-[rgba(45,212,191,0.9)] hover:bg-[rgba(45,212,191,0.38)] hover:text-[rgba(45,212,191,0.9)] disabled:bg-[rgba(45,212,191,0.1)] disabled:text-[rgba(45,212,191,0.3)] shrink-0"
                 >
                   {submitting ? (
                     <span style={{
@@ -5041,17 +5063,18 @@ function GalleryInner() {
                   )}
                   {!submitting && (
                     <KbdGroup data-icon="inline-end" className="gap-0.5">
-                      <Kbd>⌘</Kbd>
+                      <Kbd>{composeModKey}</Kbd>
                       <Kbd>↵</Kbd>
                     </KbdGroup>
                   )}
                 </Button>
               </div>
+              </div>{/* end toolbar row */}
               <ModelGuidanceStrip
                 guidance={modelGuidance}
                 onTryModel={talkingMode && isVideo ? undefined : setModelId}
               />
-            </div>{/* end bottom row */}
+            </div>{/* end bottom section */}
           </div>
         </div>
       </div>
@@ -7504,6 +7527,8 @@ const GALLERY_CSS = `
   [data-prompt-input]::placeholder { color: rgba(255,255,255,0.3); }
   .picker-scroll { scrollbar-width: none; }
   .picker-scroll::-webkit-scrollbar { display: none; }
+  .gallery-compose-toolbar { scrollbar-width: none; }
+  .gallery-compose-toolbar::-webkit-scrollbar { display: none; height: 0; }
   .seed-input::-webkit-inner-spin-button, .seed-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes pendingGlow {
