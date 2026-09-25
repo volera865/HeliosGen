@@ -5,6 +5,15 @@ import { mirrorToR2 } from "@/lib/r2";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { GUEST_MODE } from "@/lib/guestMode";
 import * as guestDb from "@/lib/guest/db";
+import { mapKieFailMessage } from "@/lib/veoFailMessage";
+import { veoDiagFail, veoDiagLog, veoDiagLookup } from "@/lib/veoDiag";
+import { veoUrlLog } from "@/lib/veoClientPayload";
+import {
+  isVeoModel,
+  isVeoOutageFailure,
+  recordVeoFailure,
+  recordVeoSuccess,
+} from "@/lib/veoOutage";
 
 // Same host allowlist used by app/api/download/route.ts for kie.ai / R2 assets.
 const ALLOWED_ORIGINS = [
@@ -43,17 +52,32 @@ function settle(taskId: string, result: Parameters<typeof jobStore.set>[1]) {
   jobEvents.emit(`job:${taskId}`, result);
 }
 
-async function loadGeneration(taskId: string): Promise<{ status: string } | null> {
+async function loadGeneration(taskId: string): Promise<{
+  status: string;
+  reference_image_urls?: string[] | null;
+} | null> {
   if (GUEST_MODE) {
     const gen = guestDb.recoverJob(taskId);
-    return gen ? { status: gen.status } : null;
+    return gen
+      ? {
+          status: gen.status,
+          reference_image_urls: (gen as { reference_image_urls?: string[] }).reference_image_urls ?? null,
+        }
+      : null;
   }
   const { data: gen } = await supabaseAdmin
     .from("generations")
-    .select("status")
+    .select("status, reference_image_urls")
     .eq("task_id", taskId)
     .single();
-  return gen ? { status: gen.status } : null;
+  return gen ?? null;
+}
+
+function generationHadFrames(gen: {
+  reference_image_urls?: string[] | null;
+} | null): boolean {
+  if (!gen) return false;
+  return Array.isArray(gen.reference_image_urls) && gen.reference_image_urls.length > 0;
 }
 
 function isTerminal(status: string): boolean {
@@ -72,7 +96,18 @@ export async function POST(req: NextRequest) {
   const state  = String(data.state ?? data.status ?? "").toLowerCase();
 
   // Log only identifiers — never the full callback body (may contain URLs/keys).
-  console.log("[callback] taskId:", taskId, "state:", state);
+  console.log("[callback] taskId:", taskId, "state:", state, "code:", body.code);
+  veoDiagLog("callback-raw", {
+    taskId: taskId ? String(taskId).slice(0, 16) : null,
+    state,
+    code: body.code,
+    msg: body.msg,
+    topKeys: Object.keys(body ?? {}),
+    dataKeys: data && typeof data === "object" ? Object.keys(data) : [],
+    failMsg: data?.failMsg,
+    failCode: data?.failCode ?? data?.errorCode,
+    hasResultJson: !!data?.resultJson,
+  });
 
   if (!taskId) {
     return NextResponse.json({ received: true });
@@ -80,14 +115,47 @@ export async function POST(req: NextRequest) {
 
   const gen = await loadGeneration(taskId);
   if (!gen || isTerminal(gen.status)) {
+    veoDiagLog("callback-skip", {
+      taskId: String(taskId).slice(0, 16),
+      reason: !gen ? "no-generation-row" : `already-terminal:${gen.status}`,
+      remembered: veoDiagLookup(String(taskId)) ?? null,
+    });
     // Unknown or already settled — ack without mutating anything.
     return NextResponse.json({ received: true });
   }
 
+  const hadFrames = generationHadFrames(gen);
+  const nImageUrls = Array.isArray(gen.reference_image_urls) ? gen.reference_image_urls.length : 0;
+  const refHosts = Array.isArray(gen.reference_image_urls)
+    ? gen.reference_image_urls.map((u) => veoUrlLog(u))
+    : [];
+
   // Treat a non-200 top-level code as a hard error (e.g. Veo 500 responses that
   // carry no state/status field but do carry body.code and body.msg).
   if (body.code !== undefined && body.code !== 200) {
-    const error = data.failMsg ?? body.msg ?? "Generation failed";
+    const error = mapKieFailMessage({
+      code: typeof body.code === "number" ? body.code : Number(body.code),
+      msg: body.msg,
+      failMsg: data.failMsg ?? data.error,
+      hadFrames,
+      nImageUrls,
+    });
+    if (isVeoModel((gen as { model?: string }).model)
+      && isVeoOutageFailure({ code: body.code as number, failMsg: data.failMsg ?? body.msg })) {
+      recordVeoFailure(String(data.failMsg ?? body.msg ?? ""));
+    }
+    veoDiagFail(String(taskId), {
+      path: "callback-code",
+      code: body.code,
+      msg: body.msg,
+      failMsg: data.failMsg,
+      failCode: data?.failCode ?? data?.errorCode,
+      hadFrames,
+      nRefs: refHosts.length,
+      refHosts,
+      mapped: error,
+      genStatus: gen.status,
+    });
     settle(taskId, { status: "error", error });
     if (GUEST_MODE) {
       guestDb.updateGeneration(taskId, { status: "error", error_msg: error });
@@ -104,6 +172,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (state === "success") {
+    if (isVeoModel((gen as { model?: string }).model)) recordVeoSuccess();
     let kieUrls = extractUrls(data.resultJson);
     if (kieUrls.length === 0 && data.videoUrl) {
       kieUrls = [data.videoUrl];
@@ -162,7 +231,28 @@ export async function POST(req: NextRequest) {
       console.log("[callback] success but no allowed URL found");
     }
   } else if (state === "fail" || state === "failed" || state === "error") {
-    const error = data.failMsg ?? data.error ?? body.msg ?? "Generation failed";
+    const error = mapKieFailMessage({
+      code: typeof body.code === "number" ? body.code : undefined,
+      msg: body.msg,
+      failMsg: data.failMsg ?? data.error ?? body.msg,
+      hadFrames,
+      nImageUrls,
+    });
+    if (isVeoModel((gen as { model?: string }).model)
+      && isVeoOutageFailure({ code: body.code as number, failMsg: data.failMsg ?? body.msg })) {
+      recordVeoFailure(String(data.failMsg ?? body.msg ?? ""));
+    }
+    veoDiagFail(String(taskId), {
+      path: "callback-state",
+      state,
+      code: body.code,
+      msg: body.msg,
+      failMsg: data.failMsg,
+      hadFrames,
+      nRefs: refHosts.length,
+      refHosts,
+      mapped: error,
+    });
     settle(taskId, { status: "error", error });
 
     if (GUEST_MODE) {

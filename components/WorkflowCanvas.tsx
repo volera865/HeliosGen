@@ -1273,7 +1273,7 @@ export default function WorkflowCanvas() {
         }
       }
 
-      // ── Video generator (Kling 3.0) ─────────────────────────────────────────
+      // ── Video generator (Kling-oriented canvas Run; Veo uses the node's own Generate) ─
       if (node.type === "videoGeneratorNode") {
         const upstream = resolveInputs(nodeId, useWorkflowStore.getState().nodes as Node<NodeData>[], edges);
         const prompt = upstream.prompt ?? "";
@@ -1281,7 +1281,14 @@ export default function WorkflowCanvas() {
         const aspectRatio = node.data.aspectRatio ?? "16:9";
         const klingMode = node.data.klingMode ?? "pro";
         const sound = node.data.sound ?? false;
+        const videoModelId = (node.data.videoModel as string | undefined) ?? "kling-3.0";
+        const veoCfg = VIDEO_MODELS.find((m) => m.id === videoModelId);
+        if (veoCfg?.apiInput.useGoogleVeo) {
+          push(`[${node.id}] skipped — Veo runs from the node's Generate button (canvas Run is Kling-path only)`, false);
+          continue;
+        }
         const payload = {
+          videoModel: videoModelId,
           prompt,
           startFrameUrl: upstream.startFrameUrl,
           endFrameUrl: upstream.endFrameUrl,

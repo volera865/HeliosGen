@@ -6,6 +6,11 @@ import { getToken } from "@/lib/galleryUtils";
 import { MODEL_GROUPS, MODELS, type ModelId } from "@/lib/models";
 import { useChatSessionStore } from "@/lib/chatSessionStore";
 import { SYSTEM_PROMPT } from "@/lib/systemPrompt";
+import {
+  parseQuickAssistResponse,
+  type QuickAssistApplyPayload,
+  type QuickAssistSettings,
+} from "@/lib/quickAssistApply";
 import { useWorkflowStore } from "@/lib/store";
 import { loadAzureBaseUrl, loadAzureTextDeployment, loadAzureTextModelName } from "@/components/SettingsModal";
 
@@ -13,10 +18,14 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   streaming?: boolean;
+  settings?: QuickAssistSettings;
 }
 
-
-export function QuickAssist() {
+export function QuickAssist({
+  onApply,
+}: {
+  onApply?: (payload: QuickAssistApplyPayload) => void;
+} = {}) {
   const [user, setUser] = useState<boolean | null>(null);
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -126,7 +135,7 @@ export function QuickAssist() {
           ],
           stream: true,
           thinkingFlag: true,
-          max_tokens: 1024,
+          max_tokens: 4096,
           ...azureConfig,
         }),
         signal: abort.signal,
@@ -162,15 +171,25 @@ export function QuickAssist() {
             const chunk = claudeChunk ?? openaiChunk ?? null;
             if (chunk) {
               accumulated += chunk;
+              // Don't flash raw JSON while streaming — show dots until we can parse
+              const looksLikeJson = accumulated.trimStart().startsWith("{");
               flushSync(() => {
-                setMessages(prev => prev.map((m, i) => i === assistantIdx ? { ...m, content: accumulated } : m));
+                setMessages(prev => prev.map((m, i) => i === assistantIdx ? {
+                  ...m,
+                  content: looksLikeJson ? "" : accumulated,
+                } : m));
               });
             }
           } catch { /* skip */ }
         }
       }
 
-      setMessages(prev => prev.map((m, i) => i === assistantIdx ? { ...m, streaming: false } : m));
+      const parsed = parseQuickAssistResponse(accumulated);
+      setMessages(prev => prev.map((m, i) => i === assistantIdx ? (
+        parsed
+          ? { ...m, content: parsed.prompt, settings: parsed.settings, streaming: false }
+          : { ...m, content: accumulated, streaming: false }
+      ) : m));
     } catch (err: unknown) {
       if ((err as Error)?.name !== "AbortError") {
         setMessages(prev => prev.map((m, i) => i === assistantIdx ? { ...m, content: "Request failed.", streaming: false } : m));
@@ -264,7 +283,7 @@ export function QuickAssist() {
               </div>
             ) : (
               messages.map((m, i) => (
-                <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: m.role === "user" ? "flex-end" : "flex-start" }}>
+                <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: m.role === "user" ? "flex-end" : "flex-start", gap: "6px" }}>
                   <div style={{ maxWidth: "85%", padding: "9px 13px", borderRadius: m.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px", background: m.role === "user" ? "rgba(45,212,191,0.15)" : "rgba(255,255,255,0.06)", border: m.role === "user" ? "1px solid rgba(45,212,191,0.25)" : "1px solid rgba(255,255,255,0.07)", fontSize: "13px", color: m.role === "user" ? "#FFFFFF" : "rgba(255,255,255,0.85)", lineHeight: 1.55, letterSpacing: "-0.01em", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                     {m.content}
                     {m.streaming && (
@@ -275,6 +294,29 @@ export function QuickAssist() {
                           </span>
                     )}
                   </div>
+                  {m.role === "assistant" && !m.streaming && m.settings && onApply && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onApply({ prompt: m.content, settings: m.settings! });
+                        setOpen(false);
+                      }}
+                      style={{
+                        display: "inline-flex", alignItems: "center", gap: "6px",
+                        padding: "6px 12px", borderRadius: "8px",
+                        border: "1px solid rgba(45,212,191,0.35)",
+                        background: "rgba(45,212,191,0.12)",
+                        color: "rgba(94,234,212,0.95)",
+                        fontSize: "12px", fontWeight: 600, fontFamily: "inherit",
+                        letterSpacing: "-0.01em", cursor: "pointer",
+                        transition: "background 120ms",
+                      }}
+                      onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(45,212,191,0.2)"; }}
+                      onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(45,212,191,0.12)"; }}
+                    >
+                      Apply to compose
+                    </button>
+                  )}
                 </div>
               ))
             )}

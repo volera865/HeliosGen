@@ -5,6 +5,7 @@ import { GUEST_MODE, GUEST_USER_ID } from "@/lib/guestMode";
 import * as guestDb from "@/lib/guest/db";
 import { createClient } from "@/lib/supabase/server";
 import { syncPendingKieJob } from "@/lib/kieJobSync";
+import { veoDiagLog, veoDiagLookup } from "@/lib/veoDiag";
 
 async function getAuthedUserId(req: NextRequest): Promise<string | null> {
   if (GUEST_MODE) return GUEST_USER_ID;
@@ -108,10 +109,16 @@ export async function GET(req: NextRequest) {
   }
 
   if (recovered === "done" || recovered === "error") {
-    return NextResponse.json(jobStore.get(taskId)!);
+    const stored = jobStore.get(taskId)!;
+    if (recovered === "error") {
+      veoDiagLog("job-status-error", {
+        taskId: taskId.slice(0, 16),
+        error: (stored as { error?: string }).error?.slice(0, 200),
+        remembered: veoDiagLookup(taskId) ?? null,
+      });
+    }
+    return NextResponse.json(stored);
   }
-
-  // Pending in DB — only trust a non-pending in-memory entry for this user's job.
   const result = jobStore.get(taskId);
   if (result && result.status !== "pending") {
     return NextResponse.json(result);

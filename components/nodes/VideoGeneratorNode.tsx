@@ -22,6 +22,7 @@ import {
   resolveTalkingRoute,
   isSeedanceTalkingFamily,
 } from "@/lib/talkingPrompt";
+import { buildVeoGenerateBody, logVeoClientPayload } from "@/lib/veoClientPayload";
 
 type VideoGeneratorNodeType = Node<NodeData, "videoGeneratorNode">;
 
@@ -1070,21 +1071,35 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
         if (j.cdnUrl) {
           if (fe.targetHandle === "startFrame") finalStartFrameUrl = j.cdnUrl;
           else finalEndFrameUrl = j.cdnUrl;
+        } else {
+          console.warn("[veo] extract-frame returned no cdnUrl", { nodeId: id, handle: fe.targetHandle });
         }
-      } catch { /* proceed without */ }
+      } catch (err) {
+        console.warn("[veo] extract-frame failed", { nodeId: id, handle: fe.targetHandle, err: String(err) });
+      }
     }
 
     // Build full payload first so debug log matches what gets sent
-    const payload: Record<string, unknown> = isVeo ? {
-      videoModel: videoModelId,
-      prompt: finalPrompt,
-      aspectRatio,
-      resolution,
-      veoMode,
-      startFrameUrl: finalStartFrameUrl,
-      endFrameUrl: finalEndFrameUrl,
-      referenceImageUrls: veoMode === "references" ? orderedResources.map(r => r.url).slice(0, 3) : undefined,
-    } : {
+    const veoRefs = veoMode === "references"
+      ? orderedResources.map(r => r.url).slice(0, 3)
+      : undefined;
+    const payload: Record<string, unknown> = isVeo
+      ? (() => {
+          const body = buildVeoGenerateBody({
+            source: "workflow",
+            modelId: videoModelId,
+            prompt: finalPrompt,
+            aspectRatio,
+            resolution: resolution || undefined,
+            veoMode,
+            startFrameUrl: finalStartFrameUrl,
+            endFrameUrl: finalEndFrameUrl,
+            referenceImageUrls: veoRefs,
+          });
+          logVeoClientPayload(body);
+          return body as unknown as Record<string, unknown>;
+        })()
+      : {
       videoModel: videoModelId,
       prompt: finalPrompt,
       aspectRatio,
@@ -1159,6 +1174,12 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
         updateNodeData(id, { taskId: json.taskId });
       } catch (e: unknown) {
         const errMsg = e instanceof Error ? e.message : String(e);
+        console.error("[veo:diag:workflow-node-error]", JSON.stringify({
+          nodeId: id,
+          model: videoModelId,
+          veoMode,
+          error: errMsg,
+        }));
         const storeNode = useWorkflowStore.getState().nodes.find((n) => n.id === id);
         const gens = [...((storeNode?.data?.generations as GenEntry[] | undefined) ?? [])] as GenEntry[];
         const slot = (storeNode?.data?.currentGenIdx as number | undefined) ?? Math.max(0, gens.length - 1);
@@ -1287,6 +1308,12 @@ export default function VideoGeneratorNode({ id, data, selected }: NodeProps<Vid
         (!connectedHandles.has("startFrame") || !connectedHandles.has("audioRef")) && (
         <MissingInputWarning messages={[
           "Upload one face image and one audio file (MP3 recommended, under 4 MB).",
+        ]} />
+      )}
+      {isVeo && veoMode === "frames" && status !== "running" && !data.locked
+        && connectedHandles.has("startFrame") && connectedHandles.has("endFrame") && (
+        <MissingInputWarning messages={[
+          "Start and end frames must be the same continuous scene — not person→product. Use References mode for product handoffs.",
         ]} />
       )}
 

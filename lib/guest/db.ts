@@ -111,7 +111,7 @@ export function updateGeneration(
 
 export function recoverJob(
   taskId: string,
-): Pick<Generation, "status" | "video_url" | "image_url" | "image_urls" | "error_msg" | "user_id" | "generation_type" | "progress_phase" | "pipeline_meta"> | null {
+): Pick<Generation, "status" | "video_url" | "image_url" | "image_urls" | "error_msg" | "user_id" | "generation_type" | "progress_phase" | "pipeline_meta" | "reference_image_urls"> | null {
   return read().generations.find((g) => g.task_id === taskId) ?? null;
 }
 

@@ -7,6 +7,23 @@ import { getKieTokenForUser } from "@/lib/getKieToken";
 import { GUEST_MODE, resolveUserId } from "@/lib/guestMode";
 import * as guestDb from "@/lib/guest/db";
 import { resolveKieCallBackUrl } from "@/lib/kieCallback";
+import { veoUrlLog } from "@/lib/veoClientPayload";
+import { probeImageUrlsDetailed } from "@/lib/veoUrlProbe";
+import {
+  hostsEqual,
+  promptHead,
+  veoDiagFail,
+  veoDiagLog,
+  veoDiagRemember,
+} from "@/lib/veoDiag";
+import { ensureKieHostedImageUrl } from "@/lib/kieFileUpload";
+import {
+  isVeoDegraded,
+  isVeoModel,
+  veoOutageState,
+  VEO_FALLBACK_MODEL_ID,
+  VEO_FALLBACK_NOTICE,
+} from "@/lib/veoOutage";
 import {
   parseTalkingVoice,
   resolveTalkingRoute,
@@ -17,6 +34,33 @@ import {
 import { runTalkingPipeline, talkingParentId } from "@/lib/talkingPipeline";
 
 const KIE_BASE = "https://api.kie.ai";
+
+function isHttpsPublicUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/** Guest local paths + https are resolvable; blob: is not. */
+function isVeoResolvableFrameUrl(url: unknown): url is string {
+  if (typeof url !== "string") return false;
+  const t = url.trim();
+  if (!t || t.startsWith("blob:")) return false;
+  if (t.startsWith("https://")) return true;
+  if (t.startsWith("data:")) return true;
+  if (t.includes("/generated/")) return true;
+  return false;
+}
+
+function urlOrigin(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
 
 interface Resource {
   url: string;
@@ -56,6 +100,7 @@ export async function POST(req: NextRequest) {
     debugOnly       = false,
     talkingMode     = false,
     talkingVoice:   rawTalkingVoice,
+    source:         veoSource,
   } = body;
 
   const hasFace = !!(rawStartFrame && String(rawStartFrame).trim())
@@ -145,6 +190,21 @@ export async function POST(req: NextRequest) {
 
   const callBackUrl = rawCallBackUrl || resolveKieCallBackUrl();
 
+  // Veo's kie channel sometimes accepts jobs then fails all of them with an
+  // opaque 500. Once detected, route to a working model instead of queueing
+  // work that cannot finish.
+  let veoFallbackFrom: string | null = null;
+  if (isVeoModel(videoModel) && isVeoDegraded()) {
+    veoFallbackFrom = videoModel;
+    videoModel = VEO_FALLBACK_MODEL_ID;
+    veoDiagLog("auto-fallback", {
+      from: veoFallbackFrom,
+      to: videoModel,
+      outage: veoOutageState(),
+      source: typeof veoSource === "string" ? veoSource : "unknown",
+    });
+  }
+
   const cfg = VIDEO_MODELS.find((m) => m.id === videoModel);
   if (!cfg) return NextResponse.json({ error: `Unknown video model: ${videoModel}` }, { status: 400 });
 
@@ -166,6 +226,7 @@ export async function POST(req: NextRequest) {
 
   let input: Record<string, unknown>;
   let effectiveApiId = cfg.apiId;
+  let veoDiagSnap: Parameters<typeof veoDiagRemember>[1] | null = null;
 
   if (apiInput.useMotionControl) {
     // ── Kling 2.6 motion control ──────────────────────────────────────────────
@@ -313,40 +374,252 @@ export async function POST(req: NextRequest) {
 
   } else if (apiInput.useGoogleVeo) {
     // ── Google Veo 3.1 ───────────────────────────────────────────────────────
-    const [startFrameUrl, endFrameUrl, refImages] = await Promise.all([
-      rawStartFrame ? ensureR2(rawStartFrame, "references").catch(() => rawStartFrame) : Promise.resolve(undefined),
-      rawEndFrame   ? ensureR2(rawEndFrame,   "references").catch(() => rawEndFrame)   : Promise.resolve(undefined),
-      Promise.all((rawRefImages as string[]).map((u) => ensureR2(u, "references").catch(() => u))),
-    ]);
+    // Gallery / workflow send imageUrls + start/end via buildVeoGenerateBody.
+    // Still map imageUrls → FLF when start/end missing (defense in depth).
+    // Guest mode often sends /generated/... paths (not https yet) — accept those,
+    // ensureR2/local, then force-rehost onto kie CDN so Veo can fetch them.
+    const sourceTag = typeof veoSource === "string" ? veoSource : "unknown";
+    const wantsFlf =
+      rawGenerationType === "FIRST_AND_LAST_FRAMES_2_VIDEO"
+      || veoMode === "frames"
+      || veoMode == null
+      || veoMode === undefined;
+    const wantsRefs =
+      rawGenerationType === "REFERENCE_2_VIDEO"
+      || veoMode === "references";
+
+    let veoStart = isVeoResolvableFrameUrl(rawStartFrame) ? String(rawStartFrame).trim() : undefined;
+    let veoEnd = isVeoResolvableFrameUrl(rawEndFrame) ? String(rawEndFrame).trim() : undefined;
+    // Client may send good imageUrls even when startFrameUrl/endFrameUrl are blob/invalid
+    const resolvableRefs = (rawRefImages as string[]).filter(isVeoResolvableFrameUrl);
+
+    if (wantsFlf && !wantsRefs) {
+      if (!veoStart && resolvableRefs[0]) veoStart = resolvableRefs[0];
+      if (!veoEnd && resolvableRefs[1]) veoEnd = resolvableRefs[1];
+    }
+
+    if (wantsFlf && !wantsRefs && !veoStart && !veoEnd && resolvableRefs.length === 0) {
+      console.warn("[veo] frames mode but zero resolvable frame URLs", { source: sourceTag, model: videoModel });
+    }
+
+    if ((rawStartFrame && !veoStart) || (rawEndFrame && !veoEnd)) {
+      veoDiagLog("dropped-unresolvable-frame", {
+        source: sourceTag,
+        rawStartOk: isVeoResolvableFrameUrl(rawStartFrame),
+        rawEndOk: isVeoResolvableFrameUrl(rawEndFrame),
+        rawStart: veoUrlLog(rawStartFrame),
+        rawEnd: veoUrlLog(rawEndFrame),
+        resolvableRefCount: resolvableRefs.length,
+      });
+    }
+
+    async function publishVeoFrame(url: string): Promise<string> {
+      const afterR2 = await ensureR2(url, "references").catch(() => url);
+      const hosted = await ensureKieHostedImageUrl(afterR2);
+      if (!isHttpsPublicUrl(hosted)) {
+        throw new Error(`Frame did not resolve to https after kie publish: ${veoUrlLog(url)}`);
+      }
+      return hosted;
+    }
+
+    let startFrameUrl: string | undefined;
+    let endFrameUrl: string | undefined;
+    let refImages: string[] = [];
+    try {
+      const published = await Promise.all([
+        veoStart ? publishVeoFrame(veoStart) : Promise.resolve(undefined as string | undefined),
+        veoEnd ? publishVeoFrame(veoEnd) : Promise.resolve(undefined as string | undefined),
+        Promise.all(resolvableRefs.map((u) => publishVeoFrame(u))),
+      ]);
+      startFrameUrl = published[0];
+      endFrameUrl = published[1];
+      refImages = published[2];
+      veoDiagLog("frames-published", {
+        source: sourceTag,
+        startHost: veoUrlLog(startFrameUrl),
+        endHost: veoUrlLog(endFrameUrl),
+        refHosts: refImages.map(veoUrlLog),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to publish frame URLs for Veo";
+      console.error("[veo] frame publish failed", { source: sourceTag, error: msg });
+      veoDiagLog("frame-publish-failed", { source: sourceTag, error: msg });
+      return NextResponse.json(
+        { error: `Could not publish frame images for Veo — ${msg}` },
+        { status: 400 },
+      );
+    }
 
     const imageUrls: string[] = [];
     let generationType = "TEXT_2_VIDEO";
 
-    // For veo3.1 lite, if an image is attached use: Image to video, just a text is attached, use text to video.
-    // On the two other models (fast/quality), one more element is present: reference.
-    const isLite = cfg.id === "veo3_lite";
-
-    if (veoMode === "references" && !isLite) {
+    // REFERENCE_2_VIDEO is supported on Fast and Lite (kie Veo 3.1 docs).
+    if (wantsRefs && (veoMode === "references" || rawGenerationType === "REFERENCE_2_VIDEO")) {
       generationType = "REFERENCE_2_VIDEO";
-      if (refImages.length > 0) imageUrls.push(...refImages.slice(0, 3));
-    } else {
-      if (startFrameUrl || endFrameUrl) {
-        generationType = "FIRST_AND_LAST_FRAMES_2_VIDEO";
-        if (startFrameUrl) imageUrls.push(startFrameUrl);
-        if (endFrameUrl) imageUrls.push(endFrameUrl);
+      const refs = refImages.length > 0
+        ? refImages
+        : [startFrameUrl, endFrameUrl].filter((u): u is string => !!u);
+      if (refs.length > 0) imageUrls.push(...refs.filter(isHttpsPublicUrl).slice(0, 3));
+    } else if (startFrameUrl || endFrameUrl) {
+      generationType = "FIRST_AND_LAST_FRAMES_2_VIDEO";
+      if (startFrameUrl && isHttpsPublicUrl(startFrameUrl)) imageUrls.push(startFrameUrl);
+      if (endFrameUrl && isHttpsPublicUrl(endFrameUrl)) imageUrls.push(endFrameUrl);
+      // If end was dropped (blob/invalid) but client sent 2 https imageUrls, restore second
+      if (imageUrls.length === 1 && refImages[1] && isHttpsPublicUrl(refImages[1])) {
+        imageUrls.push(refImages[1]);
       }
+    } else if (wantsFlf && refImages.length > 0) {
+      generationType = "FIRST_AND_LAST_FRAMES_2_VIDEO";
+      imageUrls.push(...refImages.filter(isHttpsPublicUrl).slice(0, 2));
     }
+
+    // Never send FLF/reference with an empty image list — kie returns opaque Internal Error
+    const resolvedType = rawGenerationType || generationType;
+    let finalType =
+      (resolvedType === "FIRST_AND_LAST_FRAMES_2_VIDEO" || resolvedType === "REFERENCE_2_VIDEO")
+      && imageUrls.length === 0
+        ? "TEXT_2_VIDEO"
+        : resolvedType;
 
     effectiveApiId = cfg.apiId; // Use veo3, veo3_fast, or veo3_lite directly
 
+    // Docs: FLF with 2 images = morph/transition first→last. Dissimilar assets
+    // (person→product) reliably return opaque Internal Error 500. REFERENCE_2_VIDEO
+    // is the correct mode for multi-asset product ads (Lite + Fast only).
+    if (
+      finalType === "FIRST_AND_LAST_FRAMES_2_VIDEO"
+      && imageUrls.length === 2
+    ) {
+      const o0 = urlOrigin(imageUrls[0]);
+      const o1 = urlOrigin(imageUrls[1]);
+      const mismatchedOrigins = !!(o0 && o1 && o0 !== o1);
+      if (mismatchedOrigins) {
+        if (effectiveApiId === "veo3_fast" || effectiveApiId === "veo3_lite") {
+          veoDiagLog("coerce-flf-to-reference", {
+            source: sourceTag,
+            reason: "mismatched-frame-origins",
+            o0,
+            o1,
+            apiId: effectiveApiId,
+          });
+          finalType = "REFERENCE_2_VIDEO";
+        } else {
+          return NextResponse.json({
+            error:
+              "Start and end frames are from different sources. Veo Quality first→last mode morphs between them and often fails (Internal Error). Use References mode, or pick matching frames from the same scene, or switch to Veo Fast/Lite.",
+          }, { status: 400 });
+        }
+      }
+    }
+
+    // REFERENCE_2_VIDEO is not supported on Quality veo3
+    if (finalType === "REFERENCE_2_VIDEO" && effectiveApiId === "veo3") {
+      return NextResponse.json(
+        { error: "Reference mode is not supported on Veo 3.1 Quality. Switch to Veo Fast or Lite, or use Frames mode with matching start/end frames." },
+        { status: 400 },
+      );
+    }
+
+    const finalImageUrls = finalType === "TEXT_2_VIDEO" ? [] : imageUrls;
+
+    // kie Veo only accepts 16:9 | 9:16 | Auto — reject (or coerce) others early
+    // instead of opaque upstream "Ratio error" / Internal Error.
+    const veoAspectAllowed = new Set(["16:9", "9:16", "Auto", "auto"]);
+    let veoAspect = String(aspectRatio ?? "16:9");
+    if (!veoAspectAllowed.has(veoAspect)) {
+      veoDiagLog("coerce-aspect", {
+        source: sourceTag,
+        from: veoAspect,
+        to: "Auto",
+        reason: "veo-only-allows-16:9-9:16-Auto",
+      });
+      veoAspect = "Auto";
+    } else if (veoAspect === "auto") {
+      veoAspect = "Auto";
+    }
+
+    const probeResults = finalImageUrls.length > 0
+      ? await probeImageUrlsDetailed(finalImageUrls)
+      : [];
+    veoDiagLog("probe", {
+      source: sourceTag,
+      results: probeResults.map((r) => ({
+        host: r.host,
+        ok: r.ok,
+        status: r.status,
+        method: r.method,
+        error: r.error,
+      })),
+    });
+
+    if (finalImageUrls.length > 0) {
+      const bad = probeResults.find((r) => !r.ok);
+      if (bad) {
+        const unreachable = `Frame URL not publicly reachable — re-upload and try again (${bad.host}${bad.status ? ` HTTP ${bad.status}` : ""}${bad.error ? ` ${bad.error}` : ""})`;
+        console.error("[veo] unreachable imageUrls", { source: sourceTag, detail: unreachable });
+        veoDiagLog("reject-unreachable", { source: sourceTag, unreachable, probeResults });
+        return NextResponse.json({ error: unreachable }, { status: 400 });
+      }
+    }
+
+    const startHost = startFrameUrl ? veoUrlLog(startFrameUrl) : undefined;
+    const endHost = endFrameUrl ? veoUrlLog(endFrameUrl) : undefined;
+    const sameStartEnd = hostsEqual(startFrameUrl, endFrameUrl);
+
+    veoDiagLog("server-resolve", {
+      source: sourceTag,
+      videoModel,
+      apiId: effectiveApiId,
+      veoMode: veoMode ?? "(unset)",
+      rawGenerationType: rawGenerationType ?? "(unset)",
+      rawStart: veoUrlLog(rawStartFrame),
+      rawEnd: veoUrlLog(rawEndFrame),
+      rawRefCount: Array.isArray(rawRefImages) ? rawRefImages.length : 0,
+      finalType,
+      nImageUrls: finalImageUrls.length,
+      imageHosts: finalImageUrls.map(veoUrlLog),
+      startHost,
+      endHost,
+      sameStartEnd,
+      aspectRatio: veoAspect,
+      resolution,
+      promptLen: (prompt ?? "").length,
+      promptHead: promptHead(prompt),
+      bodyKeys: Object.keys(body ?? {}),
+    });
+
+    // stash for remember after taskId
+    veoDiagSnap = {
+      source: sourceTag,
+      model: videoModel,
+      apiId: effectiveApiId,
+      veoMode: String(veoMode ?? ""),
+      generationType: finalType,
+      aspectRatio: veoAspect,
+      resolution: String(resolution ?? ""),
+      promptLen: (prompt ?? "").length,
+      promptHead: promptHead(prompt),
+      nImageUrls: finalImageUrls.length,
+      imageHosts: finalImageUrls.map(veoUrlLog),
+      startHost,
+      endHost,
+      sameStartEnd,
+      probe: probeResults.map((r) => ({
+        host: r.host,
+        ok: r.ok,
+        status: r.status,
+        method: r.method,
+      })),
+    };
+
     input = {
       prompt: prompt ?? "",
-      generationType: rawGenerationType || generationType,
-      [apiInput.aspectRatioKey!]: aspectRatio,
+      generationType: finalType,
+      [apiInput.aspectRatioKey!]: veoAspect,
       [apiInput.resolutionKey!]: resolution,
-      imageUrls: imageUrls,
+      imageUrls: finalImageUrls,
       watermark: "",
-      enableFallback: false,
+      // enableFallback intentionally omitted — deprecated in kie docs
       enableTranslation: true,
       ...(callBackUrl ? { callBackUrl } : {}),
     };
@@ -479,6 +752,16 @@ export async function POST(req: NextRequest) {
   }
 
   console.log(`[generate-video] sending to ${endpoint}:`, JSON.stringify(kieBody));
+  if (apiInput.useGoogleVeo) {
+    console.log("[veo] kie submit", {
+      endpoint,
+      model: effectiveApiId,
+      generationType: (input as { generationType?: string }).generationType,
+      nImageUrls: Array.isArray((input as { imageUrls?: string[] }).imageUrls)
+        ? (input as { imageUrls: string[] }).imageUrls.length
+        : 0,
+    });
+  }
   const createRes = await fetch(endpoint, {
     method:  "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
@@ -494,11 +777,24 @@ export async function POST(req: NextRequest) {
     }
     const errText = await createRes.text();
     console.error("[generate-video] kie.ai HTTP error:", createRes.status, errText);
+    if (apiInput.useGoogleVeo) console.error("[veo] kie HTTP error", createRes.status, errText.slice(0, 400));
     return NextResponse.json({ error: errText }, { status: 500 });
   }
 
   const createdText = await createRes.text();
   console.log("[generate-video] kie.ai response:", createdText);
+  if (apiInput.useGoogleVeo) {
+    try {
+      const created = JSON.parse(createdText) as { code?: number; msg?: string; data?: { taskId?: string } };
+      console.log("[veo] kie create ok", {
+        code: created.code,
+        msg: created.msg,
+        taskId: created.data?.taskId ?? "(none)",
+      });
+    } catch {
+      console.log("[veo] kie create raw", createdText.slice(0, 200));
+    }
+  }
   let created: { code?: number; msg?: string; data?: { taskId?: string; id?: string } };
   try {
     created = JSON.parse(createdText);
@@ -513,12 +809,31 @@ export async function POST(req: NextRequest) {
   const taskId = created.data?.taskId || created.data?.id;
   if (!taskId) return NextResponse.json({ error: "No taskId returned" }, { status: 500 });
 
+  if (veoDiagSnap) {
+    let callBackHost: string | undefined;
+    try {
+      if (callBackUrl) callBackHost = new URL(callBackUrl).host;
+    } catch { /* ignore */ }
+    veoDiagRemember(taskId, { ...veoDiagSnap, callBackHost });
+    veoDiagLog("task-created", {
+      taskId: taskId.slice(0, 16),
+      apiId: effectiveApiId,
+      generationType: (input as { generationType?: string }).generationType,
+      nImageUrls: Array.isArray((input as { imageUrls?: string[] }).imageUrls)
+        ? (input as { imageUrls: string[] }).imageUrls.length
+        : 0,
+      callBackHost,
+    });
+  }
+
   // Register as pending so the frontend can poll job-status
   jobStore.set(taskId, { status: "pending", type: "video", userId: userId ?? undefined });
 
   // Save to Supabase (fire-and-forget)
 
-  const referenceUrls: string[] = apiInput.useMotionControl
+  const referenceUrls: string[] = apiInput.useGoogleVeo
+    ? ((input.imageUrls as string[] | undefined) ?? [])
+    : apiInput.useMotionControl
     ? [
         ...((input.input_urls as string[] | undefined) ?? []),
         ...((input.video_urls as string[] | undefined) ?? []),
@@ -567,7 +882,11 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  return NextResponse.json({ taskId });
+  return NextResponse.json(
+    veoFallbackFrom
+      ? { taskId, fallbackFrom: veoFallbackFrom, fallbackTo: videoModel, notice: VEO_FALLBACK_NOTICE }
+      : { taskId },
+  );
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     const cause = e instanceof Error && (e as NodeJS.ErrnoException).cause;

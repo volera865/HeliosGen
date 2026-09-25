@@ -60,3 +60,57 @@ export async function toKieFetchableUrl(url: string): Promise<string> {
   cache.set(cacheKey, publicUrl);
   return publicUrl;
 }
+
+function isAlreadyKieHosted(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host.includes("redpandaai.co") || host.includes("kie.ai") || host === "cdn.kie.ai";
+  } catch {
+    return false;
+  }
+}
+
+async function fetchUrlToBuffer(url: string): Promise<{ buf: Buffer; mime: string; name: string }> {
+  const res = await fetch(url, { redirect: "follow" });
+  if (!res.ok) throw new Error(`Failed to fetch frame (${res.status})`);
+  const mime = (res.headers.get("content-type") ?? "image/jpeg").split(";")[0].trim();
+  const buf = Buffer.from(await res.arrayBuffer());
+  const name = url.split("/").pop()?.split("?")[0] || `frame-${Date.now()}.jpg`;
+  return { buf, mime, name };
+}
+
+/**
+ * Veo (and Google Flow behind kie) must fetch imageUrls themselves.
+ * Guest `/generated/...` paths and third-party tempfiles (aiquickdraw) often
+ * fail opaque Internal Error — re-host onto kie file CDN when needed.
+ */
+export async function ensureKieHostedImageUrl(url: string): Promise<string> {
+  const trimmed = url.trim();
+  if (!trimmed) throw new Error("Empty frame URL");
+
+  // Local guest assets
+  if (trimmed.includes("/generated/")) {
+    const hosted = await toKieFetchableUrl(trimmed);
+    if (!hosted.startsWith("https://")) {
+      throw new Error("Could not publish local frame to kie CDN");
+    }
+    return hosted;
+  }
+
+  if (!trimmed.startsWith("https://")) {
+    throw new Error("Frame URL must be https or a /generated/ path");
+  }
+
+  if (isAlreadyKieHosted(trimmed)) return trimmed;
+
+  const cacheKey = `remote::${trimmed}`;
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  const { buf, mime, name } = await fetchUrlToBuffer(trimmed);
+  const sniffed = sniffMedia(buf, name);
+  const uploadName = `${name.replace(/\.[^.]+$/, "") || "frame"}.${sniffed.ext}`;
+  const publicUrl = await uploadBufferToKie(buf, uploadName, sniffed.mime || mime);
+  cache.set(cacheKey, publicUrl);
+  return publicUrl;
+}

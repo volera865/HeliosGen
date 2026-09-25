@@ -38,6 +38,8 @@ import {
   type ModelGuidanceContext,
 } from "@/lib/modelGuidance";
 import { ModelGuidanceStrip } from "@/components/ModelGuidanceStrip";
+import type { QuickAssistApplyPayload } from "@/lib/quickAssistApply";
+import { buildVeoGenerateBody, logVeoClientPayload } from "@/lib/veoClientPayload";
 
 const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 
@@ -1041,6 +1043,7 @@ function GalleryInner() {
   const models = isVideo ? VIDEO_MODELS : IMAGE_MODELS;
 
   const skipNextModelEffect = useRef(false);
+  const pendingApplyRef = useRef<QuickAssistApplyPayload | null>(null);
 
   const [prompt, setPrompt] = useState<string>(() => loadSettings(tab, selectedFolderId)?.prompt ?? "");
   const prevFolderIdRef = useRef<string | null>(selectedFolderId);
@@ -1396,6 +1399,15 @@ function GalleryInner() {
         window.dispatchEvent(new Event("credits-refresh"));
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
+        console.error("[veo:diag:gallery-tile-error]", JSON.stringify({
+          pendingId: pending.id,
+          taskId: pending.taskId?.slice(0, 16),
+          tab: pending.tab,
+          error: msg,
+          promptLen: pending.prompt?.length,
+          nRefs: pending.referenceImageUrls?.length ?? 0,
+          promptHead: (pending.prompt ?? "").replace(/\s+/g, " ").trim().slice(0, 80),
+        }));
         setPendingGens(prev => prev.map(p => p.id === pending.id ? { ...p, error: msg } : p));
       }
     });
@@ -1526,6 +1538,79 @@ function GalleryInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authLoaded, kieKeySet]);
 
+  /** Apply Quick Assist prompt + settings into the compose bar (validated against modelConfig). */
+  const applyComposeFromAssist = useCallback((payload: QuickAssistApplyPayload, fallbackModelId?: string) => {
+    const { prompt: nextPrompt, settings } = payload;
+    const registry = settings.page === "video" ? VIDEO_MODELS : IMAGE_MODELS;
+    const model =
+      registry.find(m => m.id === settings.model)
+      ?? (fallbackModelId ? registry.find(m => m.id === fallbackModelId) : undefined)
+      ?? registry[0];
+    if (!model) return;
+
+    skipNextModelEffect.current = true;
+    setModelId(model.id);
+
+    if (model.ratios.length > 0) {
+      const nextRatio =
+        (settings.aspectRatio && model.ratios.includes(settings.aspectRatio) ? settings.aspectRatio : null)
+        ?? ("defaultRatio" in model ? (model as { defaultRatio: string }).defaultRatio : null)
+        ?? model.ratios[0];
+      if (nextRatio) setAspectRatio(nextRatio);
+    }
+
+    if (settings.page === "video") {
+      const resolutions = "resolutions" in model && Array.isArray(model.resolutions) ? model.resolutions : [];
+      if (resolutions.length > 0) {
+        const def = "defaultResolution" in model ? (model as { defaultResolution?: string }).defaultResolution : undefined;
+        const nextRes =
+          (settings.resolution && resolutions.includes(settings.resolution) ? settings.resolution : null)
+          ?? def
+          ?? resolutions[0];
+        if (nextRes) setResolution(nextRes);
+      }
+
+      const durations = "durations" in model && Array.isArray(model.durations) ? model.durations as number[] : [];
+      if (durations.length > 0) {
+        const def = "defaultDuration" in model ? (model as { defaultDuration: number }).defaultDuration : durations[0];
+        const nextDur =
+          (typeof settings.duration === "number" && durations.includes(settings.duration) ? settings.duration : null)
+          ?? def
+          ?? durations[0];
+        if (typeof nextDur === "number") setDuration(nextDur);
+      }
+
+      if (typeof settings.talkingMode === "boolean") {
+        setTalkingMode(settings.talkingMode);
+      }
+
+      const talkingOn = settings.talkingMode === true;
+      if (talkingOn) {
+        setSound(true);
+      } else if (typeof settings.sound === "boolean") {
+        if ("sound" in model && model.sound) setSound(settings.sound);
+        else setSound(false);
+      }
+    }
+
+    setPrompt(nextPrompt);
+    requestAnimationFrame(() => {
+      if (inputRef.current) resizeTextarea(inputRef.current);
+    });
+  }, []);
+
+  const handleQuickAssistApply = useCallback((payload: QuickAssistApplyPayload) => {
+    const targetTab = payload.settings.page === "video" ? "videos" : "images";
+    if (tab !== targetTab) {
+      pendingApplyRef.current = payload;
+      const params = new URLSearchParams(searchParams.toString());
+      params.set("tab", targetTab);
+      router.replace(`${pathname}?${params.toString()}`);
+      return;
+    }
+    applyComposeFromAssist(payload, modelId);
+  }, [tab, searchParams, pathname, router, applyComposeFromAssist, modelId]);
+
   useEffect(() => {
     clearSelection();
     tabRef.current = tab;
@@ -1587,6 +1672,12 @@ function GalleryInner() {
     if (restoredPrompt && inputRef.current) {
       const el = inputRef.current;
       requestAnimationFrame(() => requestAnimationFrame(() => resizeTextarea(el)));
+    }
+
+    const pending = pendingApplyRef.current;
+    if (pending) {
+      pendingApplyRef.current = null;
+      applyComposeFromAssist(pending, model.id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
@@ -2136,9 +2227,14 @@ function GalleryInner() {
         }),
       });
       const text = await res.text();
-      let d: { taskId?: string; error?: string } = {};
+      let d: { taskId?: string; error?: string; fallbackFrom?: string; fallbackTo?: string; notice?: string } = {};
       try { d = JSON.parse(text); } catch { throw new Error(res.ok ? "Invalid server response" : `Server error ${res.status}`); }
       if (!res.ok) throw new Error(d.error ?? `Server error ${res.status}`);
+      if (d.fallbackFrom) {
+        console.warn("[veo:diag:auto-fallback]", JSON.stringify({
+          from: d.fallbackFrom, to: d.fallbackTo, notice: d.notice,
+        }));
+      }
       return d.taskId!;
     } else {
       const vm = VIDEO_MODELS.find(m => m.id === modelId);
@@ -2225,33 +2321,25 @@ function GalleryInner() {
         : undefined;
 
       const isVeo = !!(vm?.apiInput.useGoogleVeo);
-      const veoImageUrls: string[] = [];
-      if (isVeo) {
-        if (veoMode === "frames") {
-          if (startFrameUrl) veoImageUrls.push(startFrameUrl);
-          if (endFrameUrl)   veoImageUrls.push(endFrameUrl);
-        } else if (veoMode === "references") {
-          if (referenceImageUrls) veoImageUrls.push(...referenceImageUrls.slice(0, 3));
-        }
-      }
-
-      const generationType = isVeo
-        ? (veoMode === "references" ? "REFERENCE_2_VIDEO" : (veoImageUrls.length > 0 ? "FIRST_AND_LAST_FRAMES_2_VIDEO" : "TEXT_2_VIDEO"))
-        : undefined;
+      const veoBody = isVeo
+        ? buildVeoGenerateBody({
+            source: "gallery",
+            modelId,
+            prompt: resolvedPrompt,
+            aspectRatio,
+            resolution: resolution || undefined,
+            veoMode,
+            startFrameUrl,
+            endFrameUrl,
+            referenceImageUrls,
+          })
+        : null;
+      if (veoBody) logVeoClientPayload(veoBody);
 
       const res = await fetch("/api/generate-video", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(isVeo ? {
-          model: modelId,
-          prompt: resolvedPrompt,
-          aspect_ratio: aspectRatio,
-          generationType,
-          imageUrls: veoImageUrls,
-          enableTranslation: true,
-          enableFallback: false,
-          watermark: "",
-        } : {
+        body: JSON.stringify(veoBody ?? {
           videoModel: modelId,
           prompt: resolvedPrompt,
           aspectRatio,
@@ -2270,9 +2358,14 @@ function GalleryInner() {
         }),
       });
       const text = await res.text();
-      let d: { taskId?: string; error?: string } = {};
+      let d: { taskId?: string; error?: string; fallbackFrom?: string; fallbackTo?: string; notice?: string } = {};
       try { d = JSON.parse(text); } catch { throw new Error(res.ok ? "Invalid server response" : `Server error ${res.status}`); }
       if (!res.ok) throw new Error(d.error ?? `Server error ${res.status}`);
+      if (d.fallbackFrom) {
+        console.warn("[veo:diag:auto-fallback]", JSON.stringify({
+          from: d.fallbackFrom, to: d.fallbackTo, notice: d.notice,
+        }));
+      }
       return d.taskId!;
     }
   };
@@ -2294,7 +2387,17 @@ function GalleryInner() {
       const poll = await fetch(`/api/job-status?taskId=${taskId}`);
       const result = await poll.json() as { status: string; error?: string; phase?: string };
       if (result.status === "done") return;
-      if (result.status === "error") throw new Error(result.error ?? "Generation failed");
+      if (result.status === "error") {
+        console.error("[veo:diag:gallery-poll]", JSON.stringify({
+          taskId: taskId.slice(0, 16),
+          error: result.error,
+          phase: result.phase,
+          modelId,
+          veoMode,
+          pollIter: i,
+        }));
+        throw new Error(result.error ?? "Generation failed");
+      }
       if (result.phase) {
         setPendingGens(prev => prev.map(p => p.taskId === taskId && p.phase !== result.phase ? { ...p, phase: result.phase } : p));
       }
@@ -2478,6 +2581,15 @@ function GalleryInner() {
           );
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
+          console.error("[veo:diag:gallery-tile-error]", JSON.stringify({
+            pendingId: pending.id,
+            taskId: pending.taskId?.slice(0, 16),
+            tab: pending.tab,
+            error: msg,
+            promptLen: pending.prompt?.length,
+            nRefs: pending.referenceImageUrls?.length ?? 0,
+            promptHead: (pending.prompt ?? "").replace(/\s+/g, " ").trim().slice(0, 80),
+          }));
           setPendingGens(prev => prev.map(p => p.id === pending.id ? { ...p, error: msg } : p));
           browserNotify("Generation failed", msg.slice(0, 100));
         }
@@ -3434,10 +3546,21 @@ function GalleryInner() {
                                   if (retryIsVideo) {
                                     const vm = VIDEO_MODELS.find(m => m.id === modelId);
                                     const isVeo = !!(vm?.apiInput.useGoogleVeo);
-                                    const res = await fetch("/api/generate-video", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(isVeo ? {
-                                      model: modelId, prompt: pg.prompt, aspect_ratio: pg.aspectRatio, generationType: "TEXT_2_VIDEO",
-                                      imageUrls: storedRefs, enableTranslation: true, enableFallback: false, watermark: "",
-                                    } : {
+                                    const veoRetry = isVeo
+                                      ? buildVeoGenerateBody({
+                                          source: "gallery",
+                                          modelId,
+                                          prompt: pg.prompt,
+                                          aspectRatio: pg.aspectRatio,
+                                          resolution: resolution || undefined,
+                                          veoMode: "frames",
+                                          startFrameUrl: storedRefs[0],
+                                          endFrameUrl: storedRefs[1],
+                                          referenceImageUrls: storedRefs,
+                                        })
+                                      : null;
+                                    if (veoRetry) logVeoClientPayload(veoRetry);
+                                    const res = await fetch("/api/generate-video", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(veoRetry ?? {
                                       videoModel: modelId, prompt: pg.prompt, aspectRatio: pg.aspectRatio, duration, mode, resolution, sound,
                                       ...(storedRefs.length > 0 ? { referenceImageUrls: storedRefs } : {}),
                                     }) });
@@ -5074,6 +5197,18 @@ function GalleryInner() {
                 guidance={modelGuidance}
                 onTryModel={talkingMode && isVideo ? undefined : setModelId}
               />
+              {isVideo && !talkingMode && (modelId === "veo3" || modelId === "veo3_fast" || modelId === "veo3_lite")
+                && veoMode === "frames" && !!vidStartFrame && !!vidEndFrame && (
+                <p style={{
+                  margin: "6px 2px 0",
+                  fontSize: "11px",
+                  lineHeight: 1.45,
+                  color: "rgba(251,146,60,0.9)",
+                  letterSpacing: "-0.01em",
+                }}>
+                  Start and end frames must be the same continuous scene. Different sources (e.g. person photo + product shot) are auto-sent as References on Veo Fast/Lite — or switch to References mode yourself. Do not use end-frame = product alone for a morph.
+                </p>
+              )}
             </div>{/* end bottom section */}
           </div>
         </div>
@@ -5373,7 +5508,7 @@ function GalleryInner() {
         </div>
       )}
 
-      <QuickAssist />
+      <QuickAssist onApply={handleQuickAssistApply} />
     </div>
   );
 }
