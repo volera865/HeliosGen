@@ -1,0 +1,113 @@
+Create a realistic fictional commercial video in vertical 9:16, filmed entirely from a fixed CCTV security-camera perspective.
+IMPORTANT PRODUCT REFERENCE
+Use the exact Volera jar from the uploaded reference image.
+The Volera jar is a short, wide, compact supplement jar — NOT a bottle.
+EVERY SINGLE VOLERA JAR IN THE ENTIRE SCENE MUST BE EXACTLY THE SAME SIZE.
+Match the reference jar precisely:
+Same physical height
+Same physical width
+Same width-to-height ratio
+Same cylindrical body
+Same black screw-on lid
+Same dark brown/black body
+Same label proportions
+Same label placement
+Same NMN and VOLERA branding
+Same colors
+Same typography
+Same overall silhouette
+There must be ZERO size variation between jars.
+A jar on the table must be the exact same size as a jar in the staff member's hand and the exact same size as a jar held by an older woman.
+Do not make some jars larger, smaller, taller, shorter, wider, or narrower.
+SETTING
+A large ordinary commercial warehouse hosting a casual consumer promotional event. Show warehouse shelves, cardboard boxes, a long wooden table, and normal overhead lighting.
+The setting is clearly a commercial event space, not a clinic, hospital, pharmacy, laboratory, or medical facility.
+PEOPLE
+Show approximately 100 older adult women, approximately ages 50–70, attending the event. They wear varied casual civilian clothing such as blouses, cardigans, floral tops, knit shirts, polo shirts, jeans, slacks, skirts, and casual shoes.
+The same woman in a simple navy-blue work outfit is the event staff member behind the wooden table.
+MAIN ACTION — ONE WOMAN AT A TIME
+The staff member gives one identical-size Volera jar to one older woman at a time.
+Follow this continuous sequence:
+One older woman walks toward the table.
+She stops directly in front of the staff member.
+The staff member picks up one Volera jar with the exact reference size and proportions.
+She holds the jar naturally in her hand.
+She extends her hand toward the woman while continuously holding the same jar.
+The woman reaches out and takes the same physical jar.
+Both hands visibly hold the same jar during the transfer.
+The staff member releases it.
+The older woman now holds the exact same jar.
+The jar stays in her hand as she turns and walks away.
+The jar physically travels with her.
+Only after she has moved away does the next woman approach.
+ABSOLUTE SIZE CONSISTENCY
+Every Volera jar must have identical dimensions throughout the entire video.
+The model must NOT change the jar's apparent physical size based on:
+which person is holding it
+distance from the camera
+position in the warehouse
+handoff stage
+lighting
+perspective
+Maintain the correct reference proportions at all times.
+REFERENCE SIZE = MASTER SIZE.
+Every jar is a duplicate of the same physical product manufactured to the same dimensions.
+PHYSICAL OBJECT CONTINUITY
+Each individual jar remains one continuous physical object:
+TABLE → STAFF MEMBER'S HAND → BOTH HANDS → OLDER WOMAN'S HAND → OLDER WOMAN WALKS AWAY
+Never make a jar disappear, reappear, resize, stretch, shrink, or transform during the handoff.
+When an older woman walks away, her jar remains in her hand and maintains the exact same size and proportions.
+CCTV CAMERA
+Use a genuine fixed security camera mounted high in the corner of the warehouse, looking diagonally downward.
+Wide overhead framing clearly shows the staff member, table, multiple attendees, and long organized line.
+The camera remains completely stationary.
+CAMERA RESTRICTIONS
+No zoom.
+No pan.
+No tilt.
+No tracking.
+No camera shake.
+No camera movement.
+No cuts.
+No transitions.
+VISUAL STABILITY
+Maintain realistic human anatomy and stable proportions throughout the entire video.
+Keep faces, hairstyles, clothing, hands, fingers, table, shelves, boxes, lighting, warehouse geometry, and every Volera jar identical and stable.
+STRICT NEGATIVE PROMPT
+No different jar sizes.
+No large jars.
+No small jars.
+No oversized jars.
+No undersized jars.
+No tall jars.
+No short jars that are smaller than the reference.
+No narrow jars.
+No wide jars that are wider than the reference.
+No vertically stretched jars.
+No horizontally stretched jars.
+No changing proportions.
+No size scaling.
+No resizing during handoff.
+No perspective-induced product distortion.
+No jar changing size between frames.
+No jar changing size between people.
+No jar changing size between table and hand.
+No bottle-shaped container.
+No redesigned Volera jar.
+No jar disappearing.
+No jar reappearing.
+No jar teleportation.
+No jar spawning.
+No jar duplication.
+No jar replacement.
+No jar morphing.
+No jar stretching.
+No jar shrinking.
+No jar melting.
+No jar distortion.
+No changing lid.
+No changing label.
+No corrupted packaging.
+No floating jars.
+No duplicated people, no disappearing people, no suddenly appearing people, no extra arms, no extra hands, no extra fingers, no missing fingers, no distorted hands, no warped bodies, no facial morphing, no clothing changes, no glitches, no flickering, no frame artifacts, no unstable geometry, no warped furniture, no shifting shelves, no perspective distortion.
+FINAL REQUIREMENT: Every Volera jar in the scene must be the exact same physical size, shape, proportions, and design as the uploaded reference jar. No exceptions.

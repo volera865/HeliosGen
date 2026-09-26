@@ -9,7 +9,7 @@ import { mapKieFailMessage } from "@/lib/veoFailMessage";
 import { veoDiagFail, veoDiagLog, veoDiagLookup } from "@/lib/veoDiag";
 import { veoUrlLog } from "@/lib/veoClientPayload";
 import {
-  isVeoModel,
+  isGoogleVideoModel,
   isVeoOutageFailure,
   recordVeoFailure,
   recordVeoSuccess,
@@ -140,7 +140,7 @@ export async function POST(req: NextRequest) {
       hadFrames,
       nImageUrls,
     });
-    if (isVeoModel((gen as { model?: string }).model)
+    if (isGoogleVideoModel((gen as { model?: string }).model)
       && isVeoOutageFailure({ code: body.code as number, failMsg: data.failMsg ?? body.msg })) {
       recordVeoFailure(String(data.failMsg ?? body.msg ?? ""));
     }
@@ -172,7 +172,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (state === "success") {
-    if (isVeoModel((gen as { model?: string }).model)) recordVeoSuccess();
+    if (isGoogleVideoModel((gen as { model?: string }).model)) recordVeoSuccess();
     let kieUrls = extractUrls(data.resultJson);
     if (kieUrls.length === 0 && data.videoUrl) {
       kieUrls = [data.videoUrl];
@@ -238,7 +238,7 @@ export async function POST(req: NextRequest) {
       hadFrames,
       nImageUrls,
     });
-    if (isVeoModel((gen as { model?: string }).model)
+    if (isGoogleVideoModel((gen as { model?: string }).model)
       && isVeoOutageFailure({ code: body.code as number, failMsg: data.failMsg ?? body.msg })) {
       recordVeoFailure(String(data.failMsg ?? body.msg ?? ""));
     }

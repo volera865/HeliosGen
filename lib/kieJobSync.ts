@@ -12,7 +12,7 @@ import { GUEST_MODE } from "@/lib/guestMode";
 import * as guestDb from "@/lib/guest/db";
 import { mapKieFailMessage } from "@/lib/veoFailMessage";
 import {
-  isVeoModel,
+  isGoogleVideoModel,
   isVeoOutageFailure,
   recordVeoFailure,
   recordVeoSuccess,
@@ -116,7 +116,7 @@ async function syncOnce(taskId: string, userId: string): Promise<JobResult | nul
       hadFrames,
       nImageUrls,
     });
-    if (isVeoModel((gen as { model?: string }).model)) {
+    if (isGoogleVideoModel((gen as { model?: string }).model)) {
       if (isVeoOutageFailure({
         code: failCode as number | string | null,
         failMsg: data.failMsg === undefined ? null : String(data.failMsg),
@@ -149,7 +149,7 @@ async function syncOnce(taskId: string, userId: string): Promise<JobResult | nul
     return { status: "pending", phase };
   }
 
-  if (isVeoModel((gen as { model?: string }).model)) recordVeoSuccess();
+  if (isGoogleVideoModel((gen as { model?: string }).model)) recordVeoSuccess();
 
   jobStore.set(taskId, { status: "pending", phase: "saving" });
   void persistProgressPhase(taskId, "saving");

@@ -18,11 +18,11 @@ import {
 } from "@/lib/veoDiag";
 import { ensureKieHostedImageUrl } from "@/lib/kieFileUpload";
 import {
+  googleFallbackNotice,
+  isGoogleVideoModel,
   isVeoDegraded,
-  isVeoModel,
   veoOutageState,
   VEO_FALLBACK_MODEL_ID,
-  VEO_FALLBACK_NOTICE,
 } from "@/lib/veoOutage";
 import {
   parseTalkingVoice,
@@ -190,11 +190,18 @@ export async function POST(req: NextRequest) {
 
   const callBackUrl = rawCallBackUrl || resolveKieCallBackUrl();
 
-  // Veo's kie channel sometimes accepts jobs then fails all of them with an
-  // opaque 500. Once detected, route to a working model instead of queueing
-  // work that cannot finish.
+  // kie's Google video channel sometimes accepts jobs then fails all of them
+  // with an opaque 500. Once detected, route to a working model instead of
+  // queueing work that cannot finish.
   let veoFallbackFrom: string | null = null;
-  if (isVeoModel(videoModel) && isVeoDegraded()) {
+  if (isGoogleVideoModel(videoModel)) {
+    veoDiagLog("outage-check", {
+      model: videoModel,
+      degraded: isVeoDegraded(),
+      outage: veoOutageState(),
+    });
+  }
+  if (isGoogleVideoModel(videoModel) && isVeoDegraded()) {
     veoFallbackFrom = videoModel;
     videoModel = VEO_FALLBACK_MODEL_ID;
     veoDiagLog("auto-fallback", {
@@ -884,7 +891,7 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json(
     veoFallbackFrom
-      ? { taskId, fallbackFrom: veoFallbackFrom, fallbackTo: videoModel, notice: VEO_FALLBACK_NOTICE }
+      ? { taskId, fallbackFrom: veoFallbackFrom, fallbackTo: videoModel, notice: googleFallbackNotice(veoFallbackFrom) }
       : { taskId },
   );
   } catch (e: unknown) {

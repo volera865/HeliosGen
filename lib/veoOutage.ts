@@ -18,7 +18,7 @@ const STATE_FILE = join(process.cwd(), "data", "veo-outage.json");
 /** Consecutive Veo 500s before we consider the channel down. */
 const FAIL_THRESHOLD = 2;
 /** Ignore failures older than this when deciding (ms). */
-const WINDOW_MS = 30 * 60 * 1000;
+const WINDOW_MS = 2 * 60 * 60 * 1000;
 
 export interface VeoOutageState {
   consecutiveFailures: number;
@@ -37,17 +37,25 @@ const EMPTY: VeoOutageState = {
 // Survive Next dev HMR, fall back to disk across restarts.
 const globalRef = globalThis as typeof globalThis & { __veoOutage?: VeoOutageState };
 
-function load(): VeoOutageState {
-  if (globalRef.__veoOutage) return globalRef.__veoOutage;
+function readDisk(): VeoOutageState | null {
   try {
-    if (existsSync(STATE_FILE)) {
-      const parsed = JSON.parse(readFileSync(STATE_FILE, "utf8")) as Partial<VeoOutageState>;
-      globalRef.__veoOutage = { ...EMPTY, ...parsed };
-      return globalRef.__veoOutage;
-    }
+    if (!existsSync(STATE_FILE)) return null;
+    const parsed = JSON.parse(readFileSync(STATE_FILE, "utf8")) as Partial<VeoOutageState>;
+    return { ...EMPTY, ...parsed };
   } catch {
-    // corrupt state file — start clean
+    return null;
   }
+}
+
+function load(): VeoOutageState {
+  const mem = globalRef.__veoOutage;
+  const disk = readDisk();
+  // HMR can leave an empty in-memory copy that shadows a newer disk file.
+  if (disk && (!mem || (disk.lastFailureAt ?? 0) > (mem.lastFailureAt ?? 0))) {
+    globalRef.__veoOutage = disk;
+    return disk;
+  }
+  if (mem) return mem;
   globalRef.__veoOutage = { ...EMPTY };
   return globalRef.__veoOutage;
 }
@@ -65,6 +73,17 @@ function save(state: VeoOutageState): void {
 export function isVeoModel(modelId: string | null | undefined): boolean {
   const id = String(modelId ?? "");
   return id === "veo3" || id === "veo3_fast" || id === "veo3_lite" || id.startsWith("veo-3");
+}
+
+/**
+ * Models served by kie's Google video channel. Verified live 2026-09-26: Veo
+ * and Gemini Omni Video fail together with the same opaque `500 Internal Error`
+ * about 25s after submit — text-only prompts with no images included — while
+ * Seedance kept working on the same key. They share the outage state because
+ * they share the failing upstream.
+ */
+export function isGoogleVideoModel(modelId: string | null | undefined): boolean {
+  return isVeoModel(modelId) || String(modelId ?? "") === "gemini-omni-video";
 }
 
 /** True when the failure is the opaque upstream Veo outage signature. */
@@ -130,3 +149,10 @@ export const VEO_FALLBACK_MODEL_ID = "seedance-2-fast";
 export const VEO_FALLBACK_NOTICE =
   "Veo 3.1 is failing upstream on kie right now (every job returns \"Internal Error\"), "
   + "so this was generated with Seedance 2.0 Fast using the same prompt and frames.";
+
+/** Same notice, but naming whichever Google model was actually swapped out. */
+export function googleFallbackNotice(fromModelId: string | null | undefined): string {
+  const label = String(fromModelId ?? "") === "gemini-omni-video" ? "Gemini Omni Video" : "Veo 3.1";
+  return `${label} is failing upstream on kie right now (every job returns "Internal Error"), `
+    + "so this was generated with Seedance 2.0 Fast using the same prompt and frames.";
+}
